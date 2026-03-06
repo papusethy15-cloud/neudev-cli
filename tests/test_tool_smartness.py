@@ -104,6 +104,35 @@ class ToolSmartnessTests(unittest.TestCase):
         self.assertIn("Automatic fallback command: python -m pytest --version", result)
         self.assertIn("pytest 8.4.1", result)
 
+    def test_run_command_restricted_mode_uses_shell_false(self):
+        tool = RunCommandTool()
+        tool.bind_workspace(FIXTURE_ROOT)
+        tool.set_execution_mode("restricted")
+
+        completed = subprocess.CompletedProcess(
+            args=["python", "--version"],
+            returncode=0,
+            stdout="Python 3.14.0",
+            stderr="",
+        )
+
+        with patch("subprocess.run", return_value=completed) as run_mock:
+            result = tool.execute("python --version")
+
+        self.assertIn("Python 3.14.0", result)
+        self.assertEqual(run_mock.call_args.args[0], ["python", "--version"])
+        self.assertFalse(run_mock.call_args.kwargs["shell"])
+
+    def test_run_command_restricted_mode_rejects_inline_execution(self):
+        tool = RunCommandTool()
+        tool.bind_workspace(FIXTURE_ROOT)
+        tool.set_execution_mode("restricted")
+
+        with self.assertRaises(Exception) as cm:
+            tool.execute("python -c \"print('nope')\"")
+
+        self.assertIn("inline execution flags", str(cm.exception))
+
     def test_read_files_batch_reads_multiple_related_files(self):
         tool = ReadFilesBatchTool()
         tool.bind_workspace(FIXTURE_ROOT)

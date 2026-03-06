@@ -9,7 +9,7 @@ CONFIG_DIR = Path.home() / ".neudev"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 HISTORY_FILE = CONFIG_DIR / "history.txt"
 VALID_AGENT_MODES = {"single", "team", "parallel"}
-VALID_RUNTIME_MODES = {"local", "remote"}
+VALID_RUNTIME_MODES = {"local", "remote", "hybrid"}
 VALID_STREAM_TRANSPORTS = {"auto", "sse", "websocket"}
 
 
@@ -37,6 +37,8 @@ class NeuDevConfig:
     remote_workspace: str = ""
     websocket_base_url: str = ""
     stream_transport: str = "auto"
+    hybrid_max_payload_bytes: int = 262144
+    hybrid_redact_secrets: bool = True
 
     # Display settings
     show_thinking: bool = False
@@ -57,6 +59,14 @@ class NeuDevConfig:
         if stream_transport not in VALID_STREAM_TRANSPORTS:
             stream_transport = "auto"
         self.stream_transport = stream_transport
+        try:
+            hybrid_max_payload_bytes = int(self.hybrid_max_payload_bytes)
+        except (TypeError, ValueError):
+            hybrid_max_payload_bytes = 262144
+        if hybrid_max_payload_bytes <= 0:
+            hybrid_max_payload_bytes = 262144
+        self.hybrid_max_payload_bytes = hybrid_max_payload_bytes
+        self.hybrid_redact_secrets = bool(self.hybrid_redact_secrets)
 
     @classmethod
     def load(cls) -> "NeuDevConfig":

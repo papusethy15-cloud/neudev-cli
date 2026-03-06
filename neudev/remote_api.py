@@ -47,6 +47,49 @@ class RemoteNeuDevClient:
         self.configure_streaming(payload)
         return payload
 
+    def list_inference_models(self) -> dict[str, Any]:
+        return self._request("GET", "/v1/inference/models")
+
+    def chat_inference(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        think: bool = False,
+    ) -> dict[str, Any]:
+        payload = {
+            "messages": messages,
+            "model": model,
+            "tools": tools,
+            "think": think,
+        }
+        return self._request("POST", "/v1/inference/chat", payload)
+
+    def stream_inference_chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        think: bool = False,
+    ) -> Iterator[dict[str, Any]]:
+        payload = {
+            "messages": messages,
+            "model": model,
+            "tools": tools,
+            "think": think,
+        }
+        for item in self._request_stream("POST", "/v1/inference/chat/stream", payload):
+            event_name = item.get("event", "")
+            data = item.get("data", {}) or {}
+            if event_name == "error":
+                raise RemoteAPIError(str(data.get("error", "Hosted inference stream failed.")), status_code=502)
+            if event_name == "chunk":
+                yield data
+            if event_name == "done":
+                break
+
     def create_session(
         self,
         *,
@@ -97,11 +140,20 @@ class RemoteNeuDevClient:
                     raise
         yield from self._request_stream("POST", f"/v1/sessions/{session_id}/messages/stream", {"message": message})
 
-    def respond_to_approval(self, session_id: str, approval_id: str, approved: bool) -> dict[str, Any]:
+    def respond_to_approval(
+        self,
+        session_id: str,
+        approval_id: str,
+        approved: bool,
+        scope: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {"approved": approved}
+        if scope:
+            payload["scope"] = scope
         return self._request(
             "POST",
             f"/v1/sessions/{session_id}/approvals/{approval_id}",
-            {"approved": approved},
+            payload,
         )
 
     def stream_approval(
@@ -109,19 +161,23 @@ class RemoteNeuDevClient:
         session_id: str,
         approval_id: str,
         approved: bool,
+        scope: str | None = None,
         transport: str = "auto",
     ) -> Iterator[dict[str, Any]]:
         effective_transport = self._pick_transport(transport)
         if effective_transport == "websocket":
             try:
+                payload = {
+                    "action": "stream_approval",
+                    "api_key": self.api_key,
+                    "session_id": session_id,
+                    "approval_id": approval_id,
+                    "approved": approved,
+                }
+                if scope:
+                    payload["scope"] = scope
                 yield from self._websocket_stream(
-                    {
-                        "action": "stream_approval",
-                        "api_key": self.api_key,
-                        "session_id": session_id,
-                        "approval_id": approval_id,
-                        "approved": approved,
-                    }
+                    payload
                 )
                 return
             except RemoteAPIError as exc:
@@ -129,10 +185,13 @@ class RemoteNeuDevClient:
                     raise
                 if exc.status_code not in (404, 426, 503):
                     raise
+        payload = {"approved": approved}
+        if scope:
+            payload["scope"] = scope
         yield from self._request_stream(
             "POST",
             f"/v1/sessions/{session_id}/approvals/{approval_id}/stream",
-            {"approved": approved},
+            payload,
         )
 
     def clear_history(self, session_id: str) -> dict[str, Any]:
@@ -354,11 +413,17 @@ class RemoteSessionClient:
     def stream_message(self, message: str, transport: str = "auto") -> Iterator[dict[str, Any]]:
         return self.client.stream_message(self.session_id, message, transport=transport)
 
-    def respond_to_approval(self, approval_id: str, approved: bool) -> dict[str, Any]:
-        return self.client.respond_to_approval(self.session_id, approval_id, approved)
+    def respond_to_approval(self, approval_id: str, approved: bool, scope: str | None = None) -> dict[str, Any]:
+        return self.client.respond_to_approval(self.session_id, approval_id, approved, scope=scope)
 
-    def stream_approval(self, approval_id: str, approved: bool, transport: str = "auto") -> Iterator[dict[str, Any]]:
-        return self.client.stream_approval(self.session_id, approval_id, approved, transport=transport)
+    def stream_approval(
+        self,
+        approval_id: str,
+        approved: bool,
+        scope: str | None = None,
+        transport: str = "auto",
+    ) -> Iterator[dict[str, Any]]:
+        return self.client.stream_approval(self.session_id, approval_id, approved, scope=scope, transport=transport)
 
     def clear_history(self) -> dict[str, Any]:
         return self.client.clear_history(self.session_id)

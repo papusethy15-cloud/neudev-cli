@@ -2,10 +2,11 @@
 
 NeuDev is a terminal-first AI coding agent built on top of Ollama.
 
-The project now supports two runtime shapes:
+The project now supports three runtime shapes:
 
 - `local`: the CLI, agent, tools, and Ollama all run on the same machine
 - `remote`: the user installs only the CLI locally, while the full agent runtime runs on a hosted server such as Lightning Studio
+- `hybrid`: the CLI, agent, tools, and workspace stay local, while Lightning hosts only model inference
 
 The current codebase already includes:
 
@@ -48,8 +49,9 @@ The core repository layout is:
 | `neudev/agent.py` | Main reasoning loop, tool execution, orchestration, planner/reviewer flow |
 | `neudev/cli.py` | Interactive CLI, slash commands, startup flow, user-facing terminal UI |
 | `neudev/llm.py` | Ollama REST client used by the hosted or local runtime |
+| `neudev/hosted_llm.py` | Hosted inference client used by the hybrid runtime |
 | `neudev/model_routing.py` | Capability presets and automatic planner/executor/reviewer model selection |
-| `neudev/remote_api.py` | Thin HTTP/SSE/WebSocket client used by the local CLI in remote mode |
+| `neudev/remote_api.py` | Thin HTTP/SSE/WebSocket client used by the local CLI in remote or hybrid mode |
 | `neudev/server.py` | Hosted NeuDev API server with persisted sessions plus SSE and optional WebSocket streaming |
 | `neudev/context.py` | Workspace scanning, component detection, convention inference, external change tracking |
 | `neudev/project_memory.py` | Persistent memory for learned stack and style preferences |
@@ -143,59 +145,95 @@ Official references:
 - DeepSeek Coder V2 library page: https://ollama.com/library/deepseek-coder-v2
 - StarCoder2 library page: https://ollama.com/library/starcoder2
 
-## 💻 Local Development Setup
+## 💻 Local Install and Development
 
-### 1. Develop locally in local mode
+### 1. Install the CLI from this repository
+
+Windows PowerShell or `cmd`:
 
 ```bash
-cd C:\WorkSpace\neu-dev
+git clone https://github.com/papusethy15-cloud/neudev-cli.git
+cd neudev-cli
 python -m pip install --upgrade pip
 python -m pip install -e .
-ollama serve
-ollama pull qwen3:latest
-ollama pull qwen2.5-coder:7b
+neu version
 ```
 
-Then run the full local agent:
+Linux, macOS, or WSL:
 
 ```bash
-neu run --runtime local --workspace . --model auto --agents parallel --language English
-```
-
-### 2. Install only the thin client on a user machine
-
-If a user will connect to a hosted Lightning runtime, they only need the CLI installed locally:
-
-```bash
-python -m pip install -e .
-neu run --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
-```
-
-The local machine does not need Ollama or models in that hosted setup.
-
-### 3. Linux or WSL local dev setup
-
-```bash
-cd /path/to/neu-dev
+git clone https://github.com/papusethy15-cloud/neudev-cli.git
+cd neudev-cli
 python3 -m pip install --upgrade pip
 python3 -m pip install -e .
+neu version
+```
+
+If you want to install straight from git without cloning first:
+
+```bash
+python -m pip install "git+https://github.com/papusethy15-cloud/neudev-cli.git"
+```
+
+### 2. One-time hosted login on a user machine
+
+If the user will connect to Lightning in `remote` or `hybrid` mode, store the hosted endpoint and API key once:
+
+```bash
+neu login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
+```
+
+That command saves the values in `~/.neudev/config.json`, so the user does not need to pass `--api-key` on every run.
+
+You can still override saved settings per session with environment variables:
+
+```bash
+set NEUDEV_API_BASE_URL=https://YOUR-HOSTED-ENDPOINT
+set NEUDEV_API_KEY=YOUR_API_KEY
+```
+
+Linux, macOS, or WSL:
+
+```bash
+export NEUDEV_API_BASE_URL="https://YOUR-HOSTED-ENDPOINT"
+export NEUDEV_API_KEY="YOUR_API_KEY"
+```
+
+### 3. Run the full local agent in local mode
+
+```bash
 ollama serve
 ollama pull qwen3:latest
 ollama pull qwen2.5-coder:7b
 neu run --runtime local --workspace . --model auto --agents parallel --language English
 ```
+
+### 4. Run the thin client against Lightning
+
+Remote hosted runtime:
+
+```bash
+neu run --runtime remote
+```
+
+Hybrid runtime with local workspace and hosted inference:
+
+```bash
+neu run --runtime hybrid --workspace /path/to/local/repo
+```
+
+The local machine does not need Ollama or downloaded models for `remote` or `hybrid`.
 
 ## 🧪 Verification
 
-The project test suite currently runs with `unittest`:
+Primary verification commands:
 
 ```bash
 python -m unittest discover -s tests -q
+python -m pytest -q
 ```
 
-This passed during repository analysis.
-
-`pytest` is not currently required by the repo, and in the inspected environment it was not installed.
+At the current state of this repository, both passed during validation.
 
 ## 💬 CLI Usage
 
@@ -210,10 +248,12 @@ neu run --runtime local --model qwen2.5-coder:7b
 Remote client runtime:
 
 ```bash
+neu login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
 neu run --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
 neu run --runtime remote --transport auto
 neu run --runtime remote --session-id YOUR_SESSION_ID
 neu run --runtime remote --workspace .
+neu run --runtime hybrid --workspace /path/to/local/repo --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
 ```
 
 Hosted server on Lightning:
@@ -233,7 +273,7 @@ Slash commands:
 | Command | Action |
 |---------|--------|
 | `/help` | Show command help |
-| `/models` | List or switch installed Ollama models |
+| `/models` | List or switch models |
 | `/sessions` | List resumable hosted sessions |
 | `/clear` | Clear conversation history |
 | `/remove` | Undo the last file change |
@@ -248,6 +288,12 @@ Slash commands:
 ## ⚙️ Configuration
 
 NeuDev stores config in `~/.neudev/config.json`.
+
+The fastest way to create that config for hosted usage is:
+
+```bash
+neu login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
+```
 
 Example:
 
@@ -276,6 +322,7 @@ Runtime modes:
 
 - `local`: run the agent and tools on the same machine as the CLI
 - `remote`: use the local CLI as a thin client against a hosted NeuDev server
+- `hybrid`: keep the workspace and tools local while Lightning provides model inference only
 
 Remote streaming transports:
 
@@ -291,9 +338,17 @@ Agent modes:
 
 Project memory is stored under `~/.codex/memories/neudev/`.
 
+Environment variables override saved config values:
+
+- `NEUDEV_API_BASE_URL`
+- `NEUDEV_API_KEY`
+- `NEUDEV_WS_BASE_URL`
+
 ## ☁️ Lightning Deployment
 
-The intended production architecture is now:
+The intended production architecture now supports two hosted shapes:
+
+### Full remote runtime
 
 1. Users install `neu` locally
 2. Users enter your hosted API base URL and API key
@@ -304,19 +359,76 @@ The intended production architecture is now:
 7. Live tool/phase/status output streams back to the local CLI over SSE or WebSocket
 8. Hosted session snapshots persist on Lightning and can be resumed with `--session-id`
 
+### Hybrid runtime
+
+1. Users install `neu` locally
+2. Users enter your hosted API base URL and API key
+3. The local CLI runs the `Agent` against the user's local repo
+4. Local tools, permissions, undo, git actions, and diagnostics stay on the user machine
+5. Lightning exposes only hosted inference endpoints backed by Ollama and the pulled models
+6. The local CLI sends model requests to Lightning but never moves the workspace there
+
 Lightning-oriented references:
 
 - Lightning Studio docs: https://lightning.ai/docs/studios
 - Lightning guide on installing dependencies and downloading data in Studio: https://lightning.ai/docs/studios/guide/get-started-with-code
 - Lightning public port guide: https://lightning.ai/docs/overview/ai-studio/deploy-on-public-ports
 
+### Fastest Lightning Studio deploy path
+
+This repository now includes deployment assets for Lightning:
+
+- `Dockerfile`
+- `.env.lightning.example`
+- `scripts/lightning_entrypoint.sh`
+- `docs/lightning-deployment.md`
+
+Recommended update cycle on the Lightning machine:
+
+```bash
+git clone https://github.com/papusethy15-cloud/neudev-cli.git
+cd neudev-cli
+cp .env.lightning.example .env.lightning
+```
+
+Edit `.env.lightning` and set at least:
+
+- `NEUDEV_API_KEY`
+- `NEUDEV_WORKSPACE`
+- `NEUDEV_SESSION_STORE`
+- `NEUDEV_OLLAMA_HOST`
+
+Then either run the container path:
+
+```bash
+docker build -t neudev-lightning .
+docker run --rm -it --env-file .env.lightning -p 8765:8765 -p 8766:8766 neudev-lightning
+```
+
+Or run directly inside Lightning Studio:
+
+```bash
+set -a
+source .env.lightning
+set +a
+bash scripts/lightning_entrypoint.sh
+```
+
+After you push new commits from local development, update Lightning with:
+
+```bash
+cd /path/to/neudev-cli
+git pull origin main
+bash scripts/lightning_entrypoint.sh
+```
+
 ### Recommended Lightning bootstrap flow
 
 Clone the repo on the Lightning machine:
 
 ```bash
-git clone <your-repo-url>
-cd neu-dev
+git clone https://github.com/papusethy15-cloud/neudev-cli.git
+cd neudev-cli
 ```
 
 Install Ollama first using the official Linux instructions if it is not already available on the image:
@@ -360,6 +472,16 @@ neu run \
   --api-base-url https://YOUR-LIGHTNING-ENDPOINT \
   --api-key YOUR_API_KEY \
   --transport auto
+```
+
+Hybrid local-workspace mode from a user machine:
+
+```bash
+neu run \
+  --runtime hybrid \
+  --workspace /path/to/local/repo \
+  --api-base-url https://YOUR-LIGHTNING-ENDPOINT \
+  --api-key YOUR_API_KEY
 ```
 
 Important deployment note:
@@ -444,7 +566,8 @@ Recommended day-to-day workflow:
 4. Pull on Lightning
 5. Run `bash scripts/lightning_bootstrap.sh`
 6. Start the hosted API with `neu serve`
-7. Have users connect with `neu run --runtime remote`
+7. Use `neu run --runtime remote` when you want the full hosted agent
+8. Use `neu run --runtime hybrid` when you want local coding with Lightning-hosted models
 
 ## 📄 License
 

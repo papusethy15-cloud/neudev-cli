@@ -19,9 +19,15 @@ from typing import Any, Callable, Iterator
 from neudev import __app_name__
 from neudev.agent import Agent
 from neudev.config import CONFIG_DIR, NeuDevConfig
-from neudev.llm import LLMError
-from neudev.permissions import PermissionManager
+from neudev.llm import LLMError, OllamaClient
+from neudev.permissions import (
+    PERMISSION_CHOICE_ALL,
+    PERMISSION_CHOICE_ONCE,
+    PERMISSION_CHOICE_TOOL,
+    PermissionManager,
+)
 from neudev.session import ActionRecord, FileBackup
+from neudev.tools.run_command import RunCommandTool
 
 try:
     from websockets.exceptions import ConnectionClosed
@@ -49,7 +55,7 @@ class HostedPermissionManager(PermissionManager):
     """Permission manager that defers approval to the remote client."""
 
     def request_permission(self, tool_name: str, message: str) -> bool:
-        if self.auto_approve or self._session_approvals.get(tool_name):
+        if self.auto_approve or self._session_approvals.get(tool_name) or self._consume_once_approval(tool_name):
             return True
         raise RemoteApprovalRequired(tool_name, message)
 
@@ -89,6 +95,8 @@ class HostedSessionService:
         self.storage_dir = Path(storage_dir).expanduser().resolve() if storage_dir else DEFAULT_SESSION_STORE.resolve()
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: dict[str, HostedSession] = {}
+        self._inference_client: OllamaClient | None = None
+        self._inference_lock = threading.Lock()
         self._load_sessions()
 
     def authenticate(self, auth_header: str | None) -> bool:
@@ -187,9 +195,12 @@ class HostedSessionService:
         with session.lock:
             models = session.agent.llm.list_models()
             display_model = session.agent.llm.get_display_model()
+            preview_model, preview_reason = session.agent.llm.preview_auto_model()
         return {
             "session_id": session.session_id,
             "display_model": display_model,
+            "auto_preview_model": preview_model,
+            "auto_preview_reason": preview_reason,
             "models": models,
         }
 
@@ -198,13 +209,80 @@ class HostedSessionService:
         with session.lock:
             session.agent.llm.switch_model(selection)
             session.agent.refresh_context()
+            preview_model, preview_reason = session.agent.llm.preview_auto_model()
             display_model = session.agent.llm.get_display_model()
             self._save_session(session)
         return {
             "status": "ok",
             "display_model": display_model,
             "selected_model": session.agent.llm.last_used_model or session.agent.llm.model,
+            "auto_preview_model": preview_model,
+            "auto_preview_reason": preview_reason,
         }
+
+    def list_inference_models(self) -> dict[str, Any]:
+        with self._inference_lock:
+            client = self._get_inference_client()
+            models = client.list_models()
+            preview_model, preview_reason = client.preview_auto_model()
+            display_model = client.get_display_model()
+        return {
+            "status": "ok",
+            "display_model": display_model,
+            "auto_preview_model": preview_model,
+            "auto_preview_reason": preview_reason,
+            "models": models,
+        }
+
+    def chat_inference(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        think: bool = False,
+    ) -> dict[str, Any]:
+        with self._inference_lock:
+            client = self._get_inference_client()
+            response = client.chat(
+                messages=messages,
+                tools=tools,
+                stream=False,
+                think=think,
+                model_name=model or client.model,
+            )
+        return {
+            "status": "ok",
+            "response": response,
+        }
+
+    def stream_inference_chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        think: bool = False,
+    ) -> Iterator[dict[str, Any]]:
+        def stream() -> Iterator[dict[str, Any]]:
+            try:
+                with self._inference_lock:
+                    client = self._get_inference_client()
+                    response_stream = client.chat(
+                        messages=messages,
+                        tools=tools,
+                        stream=True,
+                        think=think,
+                        model_name=model or client.model,
+                    )
+                    for chunk in response_stream:
+                        yield {"event": "chunk", "data": chunk}
+                yield {"event": "done", "data": {"status": "ok"}}
+            except Exception as exc:
+                yield {"event": "error", "data": {"status": "error", "error": str(exc)}}
+                yield {"event": "done", "data": {"status": "error"}}
+
+        return stream()
 
     def process_message(self, session_id: str, message: str) -> dict[str, Any]:
         session = self._get_session(session_id)
@@ -214,8 +292,20 @@ class HostedSessionService:
         session = self._get_session(session_id)
         return self._stream_operation(lambda emit: self._execute_message(session, message, emit))
 
-    def respond_to_approval(self, session_id: str, approval_id: str, approved: bool) -> dict[str, Any]:
+    def respond_to_approval(
+        self,
+        session_id: str,
+        approval_id: str,
+        approved: bool,
+        scope: str | None = None,
+    ) -> dict[str, Any]:
         session = self._get_session(session_id)
+        approval_scope = str(scope or PERMISSION_CHOICE_ONCE).strip().lower()
+        if approval_scope not in {PERMISSION_CHOICE_ONCE, PERMISSION_CHOICE_TOOL, PERMISSION_CHOICE_ALL}:
+            raise ValueError(
+                f"Invalid approval scope '{scope}'. Expected one of: "
+                f"{PERMISSION_CHOICE_ONCE}, {PERMISSION_CHOICE_TOOL}, {PERMISSION_CHOICE_ALL}."
+            )
         with session.lock:
             if approval_id != session.pending_approval_id:
                 raise KeyError(f"Unknown approval id '{approval_id}'.")
@@ -230,16 +320,29 @@ class HostedSessionService:
                 self._save_session(session)
                 return {"status": "denied", "message": f"Permission denied for {tool_name or 'tool'}."}
 
-            if tool_name:
+            if approval_scope == PERMISSION_CHOICE_ALL:
+                session.agent.permissions.auto_approve = True
+                session.config.apply_runtime_updates(persist=False, auto_permission=True)
+            elif approval_scope == PERMISSION_CHOICE_TOOL and tool_name:
                 session.agent.permissions._session_approvals[tool_name] = True
+            elif approval_scope == PERMISSION_CHOICE_ONCE and pending_message and tool_name:
+                session.agent.permissions.grant_once(tool_name)
             self._save_session(session)
 
         if not pending_message:
             return {"status": "ok", "message": "Approval stored."}
         return self._execute_message(session, pending_message)
 
-    def stream_approval(self, session_id: str, approval_id: str, approved: bool) -> Iterator[dict[str, Any]]:
-        return self._stream_operation(lambda emit: self._respond_to_approval_stream(session_id, approval_id, approved, emit))
+    def stream_approval(
+        self,
+        session_id: str,
+        approval_id: str,
+        approved: bool,
+        scope: str | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        return self._stream_operation(
+            lambda emit: self._respond_to_approval_stream(session_id, approval_id, approved, scope, emit)
+        )
 
     def get_summary(self, session_id: str) -> dict[str, Any]:
         session = self._get_session(session_id)
@@ -262,9 +365,10 @@ class HostedSessionService:
         session_id: str,
         approval_id: str,
         approved: bool,
+        scope: str | None,
         emit: Callable[[str, dict[str, Any]], None],
     ) -> dict[str, Any]:
-        result = self.respond_to_approval(session_id, approval_id, approved)
+        result = self.respond_to_approval(session_id, approval_id, approved, scope=scope)
         if result.get("status") == "denied":
             emit("denied", result)
         return result
@@ -423,6 +527,17 @@ class HostedSessionService:
         permissions = HostedPermissionManager()
         permissions.auto_approve = config.auto_permission
         agent.permissions = permissions
+        run_command = agent.tool_registry.get("run_command")
+        if isinstance(run_command, RunCommandTool):
+            extra_commands = [
+                item.strip()
+                for item in os.environ.get("NEUDEV_HOSTED_RUN_COMMAND_ALLOWLIST", "").split(",")
+                if item.strip()
+            ]
+            run_command.set_execution_mode(
+                os.environ.get("NEUDEV_HOSTED_RUN_COMMAND_MODE", "restricted"),
+                extra_allowed_commands=extra_commands,
+            )
         now = datetime.now(UTC).isoformat()
         return HostedSession(
             session_id=session_id,
@@ -431,6 +546,11 @@ class HostedSessionService:
             created_at=created_at or now,
             updated_at=updated_at or now,
         )
+
+    def _get_inference_client(self) -> OllamaClient:
+        if self._inference_client is None:
+            self._inference_client = OllamaClient(self.base_config.clone())
+        return self._inference_client
 
     def _session_snapshot(self, session: HostedSession) -> dict[str, Any]:
         return {
@@ -636,6 +756,32 @@ class NeuDevHTTPRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body() if method == "POST" else {}
             path_parts = [part for part in path_only.split("/") if part]
 
+            if path_parts == ["v1", "inference", "models"] and method == "GET":
+                self._send_json(HTTPStatus.OK, self.server.service.list_inference_models())
+                return
+            if path_parts == ["v1", "inference", "chat"] and method == "POST":
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.service.chat_inference(
+                        messages=payload.get("messages") or [],
+                        model=payload.get("model"),
+                        tools=payload.get("tools"),
+                        think=bool(payload.get("think")),
+                    ),
+                )
+                return
+            if path_parts == ["v1", "inference", "chat", "stream"] and method == "POST":
+                self._send_sse(
+                    HTTPStatus.OK,
+                    self.server.service.stream_inference_chat(
+                        messages=payload.get("messages") or [],
+                        model=payload.get("model"),
+                        tools=payload.get("tools"),
+                        think=bool(payload.get("think")),
+                    ),
+                )
+                return
+
             if path_parts == ["v1", "sessions"] and method == "GET":
                 self._send_json(HTTPStatus.OK, self.server.service.list_sessions())
                 return
@@ -702,6 +848,7 @@ class NeuDevHTTPRequestHandler(BaseHTTPRequestHandler):
                             session_id,
                             path_parts[4],
                             bool(payload.get("approved")),
+                            payload.get("scope"),
                         ),
                     )
                     return
@@ -717,6 +864,7 @@ class NeuDevHTTPRequestHandler(BaseHTTPRequestHandler):
                             session_id,
                             path_parts[4],
                             bool(payload.get("approved")),
+                            payload.get("scope"),
                         ),
                     )
                     return
@@ -817,6 +965,7 @@ class NeuDevWebSocketServer:
                     str(payload.get("session_id", "")),
                     str(payload.get("approval_id", "")),
                     bool(payload.get("approved")),
+                    str(payload.get("scope", "")) or None,
                 )
             else:
                 websocket.send(
@@ -908,6 +1057,7 @@ def serve_api(
     print(f"{__app_name__} server listening on http://{host}:{server.server_port}")
     print(f"Workspace root: {Path(workspace).resolve()}")
     print(f"Session store: {service.storage_dir}")
+    print(f"Hosted run_command policy: {os.environ.get('NEUDEV_HOSTED_RUN_COMMAND_MODE', 'restricted')}")
     if websocket_server is not None:
         print(f"WebSocket stream listening on ws://{host}:{websocket_server.server_port}{DEFAULT_WEBSOCKET_PATH}")
 

@@ -23,8 +23,14 @@ from rich.theme import Theme
 from neudev import __app_name__, __version__
 from neudev.agent import Agent
 from neudev.config import CONFIG_DIR, HISTORY_FILE, NeuDevConfig
+from neudev.hosted_llm import HostedLLMClient
 from neudev.llm import ConnectionError as OllamaConnectionError
 from neudev.llm import LLMError, ModelNotFoundError
+from neudev.permissions import (
+    PERMISSION_CHOICE_ALL,
+    PERMISSION_CHOICE_DENY,
+    prompt_permission_choice,
+)
 from neudev.remote_api import RemoteAPIError, RemoteNeuDevClient, RemoteSessionClient
 from neudev.server import serve_api
 
@@ -143,7 +149,7 @@ def handle_help() -> None:
     table.add_column("Description", style="white")
     table.add_row("/help", "Show this help message")
     table.add_row("/models", "List or switch models")
-    table.add_row("/sessions", "List resumable remote sessions")
+    table.add_row("/sessions", "List resumable remote sessions (remote only)")
     table.add_row("/clear", "Clear conversation history")
     table.add_row("/remove", "Undo last file change")
     table.add_row("/history", "Show session action log")
@@ -353,34 +359,80 @@ def render_remote_error(payload: dict[str, str]) -> None:
     console.print()
 
 
-def ask_remote_permission(tool_name: str, message: str) -> bool:
+def ask_remote_permission(tool_name: str, message: str) -> str:
     """Prompt for remote tool permission."""
-    console.print()
-    console.print(
-        Panel(
-            f"[bold]{message}[/bold]",
-            title=f"[yellow]⚠️  Remote Permission Required: {tool_name}[/yellow]",
-            border_style="yellow",
-            padding=(0, 1),
-        )
-    )
-    choice = Prompt.ask("Allow?", choices=["y", "n"], default="n")
-    return choice == "y"
+    return prompt_permission_choice(tool_name, message, title_prefix="Remote Permission Required")
 
 
-def prompt_for_remote_settings(config: NeuDevConfig) -> tuple[str, str]:
-    """Ensure remote API base URL and API key are available."""
+def prompt_for_hosted_settings(config: NeuDevConfig, *, runtime_mode: str) -> tuple[str, str]:
+    """Ensure hosted API settings are available for remote or hybrid modes."""
+    runtime_label = "Remote" if runtime_mode == "remote" else "Hosted inference"
     api_base_url = os.environ.get("NEUDEV_API_BASE_URL") or config.api_base_url
     if not api_base_url:
-        api_base_url = Prompt.ask("Remote API base URL", default="http://127.0.0.1:8765")
-        config.update(api_base_url=api_base_url, runtime_mode="remote")
+        api_base_url = Prompt.ask(f"{runtime_label} API base URL", default="http://127.0.0.1:8765")
+        config.update(api_base_url=api_base_url, runtime_mode=runtime_mode)
 
     api_key = os.environ.get("NEUDEV_API_KEY") or config.api_key
     if not api_key:
-        api_key = Prompt.ask("Remote API key", password=True)
-        config.update(api_key=api_key, runtime_mode="remote")
+        api_key = Prompt.ask(f"{runtime_label} API key", password=True)
+        config.update(api_key=api_key, runtime_mode=runtime_mode)
 
     return api_base_url, api_key
+
+
+def run_login_setup(args: argparse.Namespace | None = None) -> None:
+    """Persist hosted API settings for remote or hybrid CLI usage."""
+    config = NeuDevConfig.load()
+    runtime_mode = getattr(args, "runtime", None) or config.runtime_mode or "remote"
+    if runtime_mode not in {"remote", "hybrid"}:
+        runtime_mode = "remote"
+
+    default_api_base_url = (getattr(args, "api_base_url", None) or config.api_base_url or "http://127.0.0.1:8765").strip()
+    api_base_url = default_api_base_url.rstrip("/")
+    if not api_base_url:
+        api_base_url = Prompt.ask("Hosted API base URL", default="http://127.0.0.1:8765").strip().rstrip("/")
+
+    api_key = (getattr(args, "api_key", None) or config.api_key or "").strip()
+    if not api_key:
+        api_key = Prompt.ask("Hosted API key", password=True).strip()
+    if not api_key:
+        console.print("\n  [error]❌ API key cannot be empty.[/error]\n")
+        return
+
+    websocket_base_url = getattr(args, "ws_base_url", None)
+    if websocket_base_url is None:
+        websocket_base_url = config.websocket_base_url
+    websocket_base_url = str(websocket_base_url or "").strip().rstrip("/")
+
+    updates = {
+        "runtime_mode": runtime_mode,
+        "api_base_url": api_base_url,
+        "api_key": api_key,
+    }
+    if websocket_base_url:
+        updates["websocket_base_url"] = websocket_base_url
+    config.update(**updates)
+
+    console.print()
+    table = Table(
+        title="[bold bright_cyan]🔐 Hosted Login Saved[/bold bright_cyan]",
+        show_header=False,
+        border_style="bright_blue",
+        padding=(0, 1),
+        expand=False,
+        width=min(console.width, 78),
+    )
+    table.add_column("Key", style="muted")
+    table.add_column("Value", style="bold white")
+    table.add_row("Config File", str(CONFIG_DIR / "config.json"))
+    table.add_row("Runtime", runtime_mode)
+    table.add_row("API Base URL", api_base_url)
+    table.add_row("API Key", "saved")
+    if websocket_base_url:
+        table.add_row("WebSocket URL", websocket_base_url)
+    console.print(table)
+    console.print("  [dim]Environment variables still override saved values: NEUDEV_API_BASE_URL, NEUDEV_API_KEY, NEUDEV_WS_BASE_URL.[/dim]")
+    console.print()
 
 
 def handle_local_models(agent: Agent, selection: str | None = None) -> None:
@@ -485,6 +537,16 @@ def handle_remote_models(session: RemoteSessionClient, config: NeuDevConfig, sel
     table.add_column("Size", style="dim", justify="right")
     table.add_column("Role", style="dim")
     table.add_column("Active", justify="center")
+    auto_active = "✅" if config.model == "auto" else "  "
+    auto_preview = payload.get("auto_preview_model") or "No model available"
+    table.add_row(
+        "0",
+        "auto",
+        "-",
+        f"Task-routed -> {auto_preview}",
+        auto_active,
+        style="bold bright_green" if auto_active.strip() else "",
+    )
     for index, model in enumerate(models, 1):
         size_mb = model["size"] / (1024 * 1024)
         size_str = f"{size_mb:.0f} MB" if size_mb < 1024 else f"{size_mb / 1024:.1f} GB"
@@ -499,14 +561,18 @@ def handle_remote_models(session: RemoteSessionClient, config: NeuDevConfig, sel
         )
     console.print(table)
     console.print(f"  [dim]Current remote model: {payload.get('display_model', config.model)}[/dim]")
+    if payload.get("auto_preview_reason"):
+        console.print(f"  [dim]Auto routing: {payload.get('auto_preview_reason')}[/dim]")
     console.print()
 
     choice = (selection or "").strip()
     if not choice:
-        choice = Prompt.ask("Enter a model number or model name", default="")
+        choice = Prompt.ask("Enter `0` for auto, a model number, or a model name", default="")
     if not choice:
         return
-    if choice.isdigit() and 0 < int(choice) <= len(models):
+    if choice.lower() == "auto" or choice == "0":
+        selected_name = "auto"
+    elif choice.isdigit() and 0 < int(choice) <= len(models):
         selected_name = models[int(choice) - 1]["name"]
     else:
         selected_name = choice
@@ -517,6 +583,81 @@ def handle_remote_models(session: RemoteSessionClient, config: NeuDevConfig, sel
         console.print(f"\n  [success]✅ Remote model: {result.get('display_model', selected_name)}[/success]\n")
     except RemoteAPIError as exc:
         console.print(f"\n  [error]❌ Failed to switch remote model: {exc}[/error]\n")
+
+
+def handle_hybrid_models(agent: Agent, config: NeuDevConfig, selection: str | None = None) -> None:
+    """List or switch hosted models used by the hybrid runtime."""
+    try:
+        models = agent.llm.list_models()
+    except LLMError as exc:
+        console.print(f"\n  [error]❌ Error listing hosted models: {exc}[/error]\n")
+        return
+    if not models:
+        console.print("\n  [warning]⚠️  No hosted models are available.[/warning]\n")
+        return
+
+    console.print()
+    table = Table(
+        title="[bold bright_cyan]🌩️ Hybrid Hosted Models[/bold bright_cyan]",
+        show_header=True,
+        header_style="bold bright_cyan",
+        border_style="bright_blue",
+        padding=(0, 1),
+        expand=False,
+        width=min(console.width, 72),
+    )
+    table.add_column("#", style="dim", width=3, justify="center")
+    table.add_column("Model", style="bold white")
+    table.add_column("Size", style="dim", justify="right")
+    table.add_column("Role", style="dim")
+    table.add_column("Active", justify="center")
+
+    preview_model, preview_reason = agent.llm.preview_auto_model()
+    auto_active = "✅" if agent.llm.model == "auto" else "  "
+    table.add_row(
+        "0",
+        "auto",
+        "-",
+        f"Task-routed -> {preview_model or 'No model available'}",
+        auto_active,
+        style="bold bright_green" if auto_active.strip() else "",
+    )
+
+    for index, model in enumerate(models, 1):
+        size_mb = model["size"] / (1024 * 1024)
+        size_str = f"{size_mb:.0f} MB" if size_mb < 1024 else f"{size_mb / 1024:.1f} GB"
+        active = "✅" if model.get("active") else "  "
+        table.add_row(
+            str(index),
+            model["name"],
+            size_str,
+            model.get("role", ""),
+            active,
+            style="bold bright_green" if active.strip() else "",
+        )
+    console.print(table)
+    console.print(f"  [dim]Hosted inference endpoint: {config.api_base_url or '(unset)'}[/dim]")
+    console.print(f"  [dim]Auto routing: {preview_reason}[/dim]")
+    console.print()
+
+    choice = (selection or "").strip()
+    if not choice:
+        choice = Prompt.ask("Enter `0` for auto, a model number, or a model name", default="")
+    if not choice:
+        return
+    if choice.lower() == "auto" or choice == "0":
+        selected_name = "auto"
+    elif choice.isdigit() and 0 < int(choice) <= len(models):
+        selected_name = models[int(choice) - 1]["name"]
+    else:
+        selected_name = choice
+
+    try:
+        agent.llm.switch_model(selected_name)
+        agent.refresh_context()
+        console.print(f"\n  [success]✅ Hybrid model mode: {agent.llm.get_display_model()}[/success]\n")
+    except LLMError as exc:
+        console.print(f"\n  [error]❌ Failed to switch hosted model: {exc}[/error]\n")
 
 
 def handle_local_config(agent: Agent) -> None:
@@ -580,6 +721,37 @@ def handle_remote_config(session: RemoteSessionClient, config: NeuDevConfig) -> 
     table.add_row("WebSocket URL", config.websocket_base_url or "(auto)")
     table.add_row("Project Type", remote.get("project_type", "unknown"))
     table.add_row("Tech Stack", ", ".join(remote.get("technologies", [])[:4]) or "unknown")
+    console.print(table)
+    console.print()
+
+
+def handle_hybrid_config(agent: Agent, config: NeuDevConfig) -> None:
+    """Render hybrid runtime config."""
+    workspace_info = agent.context.analyze()
+    console.print()
+    table = Table(
+        title="[bold bright_cyan]⚙️  Hybrid Configuration[/bold bright_cyan]",
+        show_header=True,
+        header_style="bold bright_cyan",
+        border_style="bright_blue",
+        padding=(0, 2),
+        expand=False,
+        width=min(console.width, 78),
+    )
+    table.add_column("Setting", style="bold white")
+    table.add_column("Value", style="bright_cyan")
+    table.add_row("Runtime", "hybrid")
+    table.add_row("Local Workspace", agent.workspace)
+    table.add_row("Hosted Inference API", config.api_base_url or "(unset)")
+    table.add_row("Model", agent.llm.get_display_model())
+    table.add_row("Agent Mode", config.agent_mode)
+    table.add_row("Reply Language", config.response_language)
+    table.add_row("Auto Permission", "ON" if agent.permissions.auto_approve else "OFF")
+    table.add_row("Secret Redaction", "ON" if config.hybrid_redact_secrets else "OFF")
+    table.add_row("Payload Limit", f"{config.hybrid_max_payload_bytes} bytes")
+    table.add_row("Workspace Type", workspace_info.get("project_type", "unknown"))
+    table.add_row("Tech Stack", ", ".join(workspace_info.get("technologies", [])[:4]) or "unknown")
+    table.add_row("Show Thinking", "ON" if config.show_thinking else "OFF")
     console.print(table)
     console.print()
 
@@ -676,49 +848,50 @@ def handle_remote_thinking(session: RemoteSessionClient, config: NeuDevConfig) -
 def process_local_user_input(agent: Agent, user_input: str) -> None:
     """Process a local user message."""
     console.print()
+    console.print("  [dim]🧠 Thinking...[/dim]")
+    console.print()
     thinking_parts: list[str] = []
     response = ""
 
-    with console.status("[bold bright_cyan]🧠 Thinking...[/bold bright_cyan]", spinner="dots"):
-        try:
-            response = agent.process_message(
-                user_input,
-                on_status=lambda tool_name, args: console.print(
-                    f"    [tool]🔧 {tool_name}[/tool]  [dim]{args.get('path') or args.get('command') or args.get('directory') or ''}[/dim]"
-                ),
-                on_thinking=thinking_parts.append,
-                on_phase=lambda phase, model_name: console.print(
-                    f"    [accent]{phase}[/accent]  [dim]{model_name}[/dim]"
-                ),
-                on_workspace_change=render_workspace_change,
-                on_plan_update=lambda plan, conventions: render_plan_panel(
-                    {"plan": [dict(item) for item in plan], "conventions": list(conventions)}
-                ),
+    try:
+        response = agent.process_message(
+            user_input,
+            on_status=lambda tool_name, args: console.print(
+                f"    [tool]🔧 {tool_name}[/tool]  [dim]{args.get('path') or args.get('command') or args.get('directory') or ''}[/dim]"
+            ),
+            on_thinking=thinking_parts.append,
+            on_phase=lambda phase, model_name: console.print(
+                f"    [accent]{phase}[/accent]  [dim]{model_name}[/dim]"
+            ),
+            on_workspace_change=render_workspace_change,
+            on_plan_update=lambda plan, conventions: render_plan_panel(
+                {"plan": [dict(item) for item in plan], "conventions": list(conventions)}
+            ),
+        )
+    except LLMError as exc:
+        console.print(
+            Panel(
+                f"[bold red]❌ Error[/bold red]\n\n[white]{exc}[/white]",
+                border_style="red",
+                title="[bold red]⚠️  Something went wrong[/bold red]",
+                padding=(1, 2),
+                expand=False,
             )
-        except LLMError as exc:
-            console.print(
-                Panel(
-                    f"[bold red]❌ Error[/bold red]\n\n[white]{exc}[/white]",
-                    border_style="red",
-                    title="[bold red]⚠️  Something went wrong[/bold red]",
-                    padding=(1, 2),
-                    expand=False,
-                )
+        )
+        console.print()
+        return
+    except Exception as exc:
+        console.print(
+            Panel(
+                f"[bold red]❌ Unexpected Error[/bold red]\n\n[white]{type(exc).__name__}: {exc}[/white]",
+                border_style="red",
+                title="[bold red]⚠️  Something went wrong[/bold red]",
+                padding=(1, 2),
+                expand=False,
             )
-            console.print()
-            return
-        except Exception as exc:
-            console.print(
-                Panel(
-                    f"[bold red]❌ Unexpected Error[/bold red]\n\n[white]{type(exc).__name__}: {exc}[/white]",
-                    border_style="red",
-                    title="[bold red]⚠️  Something went wrong[/bold red]",
-                    padding=(1, 2),
-                    expand=False,
-                )
-            )
-            console.print()
-            return
+        )
+        console.print()
+        return
 
     render_thinking("".join(thinking_parts).strip())
     render_agent_routing(
@@ -762,11 +935,19 @@ def _consume_remote_stream(
             render_plan_panel(payload)
         elif event_name == "approval_required":
             console.print()
-            approved = ask_remote_permission(payload.get("tool_name", "tool"), payload.get("message", ""))
+            decision = ask_remote_permission(payload.get("tool_name", "tool"), payload.get("message", ""))
+            approved = decision != PERMISSION_CHOICE_DENY
+            if decision == PERMISSION_CHOICE_ALL:
+                config.apply_runtime_updates(persist=False, auto_permission=True)
             return _consume_remote_stream(
                 session,
                 config,
-                session.stream_approval(payload["approval_id"], approved, transport=config.stream_transport),
+                session.stream_approval(
+                    payload["approval_id"],
+                    approved,
+                    scope=decision if approved else None,
+                    transport=config.stream_transport,
+                ),
             )
         elif event_name == "error":
             render_remote_error(payload)
@@ -967,9 +1148,111 @@ def run_local_cli(config: NeuDevConfig, workspace: str | None = None) -> None:
             process_local_user_input(agent, user_input)
 
 
+def run_hybrid_cli(config: NeuDevConfig, workspace: str | None = None) -> None:
+    """Run the hybrid CLI with local tools and hosted inference."""
+    api_base_url, api_key = prompt_for_hosted_settings(config, runtime_mode="hybrid")
+    config.api_base_url = api_base_url
+    config.api_key = api_key
+    workspace = workspace or os.getcwd()
+    print_banner(config, workspace, runtime_label="hybrid")
+    try:
+        with console.status("[bold bright_cyan]🌩️ Connecting local agent to hosted inference...[/bold bright_cyan]", spinner="dots"):
+            llm_client = HostedLLMClient(config, api_base_url, api_key)
+            agent = Agent(config, workspace, llm_client=llm_client)
+            agent.permissions.auto_approve = config.auto_permission
+            config.update(runtime_mode="hybrid")
+    except (ModelNotFoundError, LLMError) as exc:
+        console.print(f"\n  [error]❌ Failed to initialize hybrid NeuDev: {exc}[/error]\n")
+        return
+
+    print_status_block(
+        [
+            ("✅", f"Local workspace: {agent.workspace}", "success"),
+            ("✅", f"Hosted inference: {api_base_url}", "success"),
+            ("✅", f"Model: {agent.llm.get_display_model()}", "success"),
+            ("✅", f"Orchestration: {config.agent_mode}", "success"),
+            ("✅", f"Tools: {len(agent.tool_registry.get_all())} local", "success"),
+        ]
+    )
+    redaction_state = "ON" if config.hybrid_redact_secrets else "OFF"
+    console.print(
+        f"  [dim]Privacy: local tools stay local. Secret redaction {redaction_state}. "
+        f"Payload cap {config.hybrid_max_payload_bytes} bytes.[/dim]"
+    )
+    console.print()
+    console.print(Rule(style="bright_blue"))
+    console.print()
+
+    prompt_session = build_prompt_session()
+    while True:
+        try:
+            user_input = prompt_session.prompt([("class:prompt", "neudev ❯ ")]).strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n  [dim]👋 Goodbye![/dim]\n")
+            break
+        if not user_input:
+            continue
+
+        parts = user_input.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd in ("/exit", "/quit"):
+            handle_local_exit(agent)
+            break
+        if cmd == "/help":
+            handle_help()
+        elif cmd == "/models":
+            handle_hybrid_models(agent, config, arg or None)
+        elif cmd == "/sessions":
+            console.print("\n  [dim]📭 Hybrid runtime keeps history locally, so hosted sessions are not used.[/dim]\n")
+        elif cmd == "/clear":
+            agent.clear_history()
+            console.print("\n  [success]✅ Conversation history cleared.[/success]\n")
+        elif cmd == "/remove":
+            result = agent.session.undo_last_change()
+            if result:
+                agent.refresh_context()
+                agent.context.mark_workspace_state()
+                console.print(f"\n  [success]✅ {result}[/success]\n")
+            else:
+                console.print("\n  [dim]📭 Nothing to undo.[/dim]\n")
+        elif cmd == "/history":
+            print_history_table(
+                [
+                    {
+                        "action": item.action,
+                        "target": item.target,
+                        "timestamp": item.timestamp,
+                        "details": item.details,
+                    }
+                    for item in agent.session.actions
+                ]
+            )
+        elif cmd == "/config":
+            handle_hybrid_config(agent, config)
+        elif cmd == "/agents":
+            handle_local_agents(agent, arg or None)
+        elif cmd == "/language":
+            handle_local_language(agent, arg or None)
+        elif cmd == "/thinking":
+            handle_thinking(config)
+            agent.config.show_thinking = config.show_thinking
+        elif cmd == "/close":
+            console.print("\n  [dim]📭 Hybrid runtime has no hosted workspace session to close. Use /exit instead.[/dim]\n")
+        elif cmd == "/version":
+            console.print(f"\n  [bold bright_cyan]⚡ {__app_name__}[/bold bright_cyan] [dim]v{__version__}[/dim]\n")
+        elif user_input.startswith("/"):
+            console.print(f"\n  [warning]⚠️  Unknown command: {user_input}[/warning]\n")
+        else:
+            process_local_user_input(agent, user_input)
+
+
 def run_remote_cli(config: NeuDevConfig, workspace: str | None = None, session_id: str | None = None) -> None:
     """Run the remote interactive CLI."""
-    api_base_url, api_key = prompt_for_remote_settings(config)
+    api_base_url, api_key = prompt_for_hosted_settings(config, runtime_mode="remote")
+    config.api_base_url = api_base_url
+    config.api_key = api_key
     remote_workspace = workspace or config.remote_workspace or "."
     print_banner(config, remote_workspace, runtime_label="remote")
 
@@ -1092,9 +1375,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--model", "-m", type=str, default=None, help="Model to use")
     run_parser.add_argument("--language", "-l", type=str, default=None, help="Preferred reply language")
     run_parser.add_argument("--agents", choices=["single", "team", "parallel"], default=None, help="Agent orchestration mode")
-    run_parser.add_argument("--runtime", choices=["local", "remote"], default=None, help="Run locally or connect to a hosted API")
-    run_parser.add_argument("--api-base-url", default=None, help="Hosted NeuDev API base URL for remote mode")
-    run_parser.add_argument("--api-key", default=None, help="Hosted NeuDev API key for remote mode")
+    run_parser.add_argument("--runtime", choices=["local", "remote", "hybrid"], default=None, help="Run fully local, fully hosted, or hybrid with local tools plus hosted inference")
+    run_parser.add_argument("--api-base-url", default=None, help="Hosted NeuDev API base URL for remote or hybrid mode")
+    run_parser.add_argument("--api-key", default=None, help="Hosted NeuDev API key for remote or hybrid mode")
     run_parser.add_argument("--ws-base-url", default=None, help="Hosted NeuDev WebSocket URL for remote streaming")
     run_parser.add_argument("--transport", choices=["auto", "sse", "websocket"], default=None, help="Remote streaming transport")
     run_parser.add_argument("--session-id", default=None, help="Resume an existing hosted session by ID")
@@ -1113,6 +1396,12 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--session-store", default=None, help="Directory for persisted hosted session snapshots")
     serve_parser.add_argument("--ws-port", type=int, default=None, help="Optional WebSocket port for remote streaming")
     serve_parser.add_argument("--disable-websocket", action="store_true", help="Disable the WebSocket stream server")
+
+    login_parser = subparsers.add_parser("login", help="Persist hosted API settings for remote or hybrid usage")
+    login_parser.add_argument("--runtime", choices=["remote", "hybrid"], default="remote", help="Default runtime to store with the hosted credentials")
+    login_parser.add_argument("--api-base-url", default=None, help="Hosted NeuDev API base URL to save in local config")
+    login_parser.add_argument("--api-key", default=None, help="Hosted NeuDev API key to save in local config")
+    login_parser.add_argument("--ws-base-url", default=None, help="Optional hosted WebSocket URL to save in local config")
 
     subparsers.add_parser("version", help="Show version")
     return parser
@@ -1155,6 +1444,10 @@ def main() -> None:
         print(f"{__app_name__} v{__version__}")
         return
 
+    if args.command == "login":
+        run_login_setup(args)
+        return
+
     if args.command == "serve":
         serve_api(
             host=args.host,
@@ -1177,6 +1470,8 @@ def main() -> None:
         workspace = getattr(args, "workspace", None)
         if config.runtime_mode == "remote":
             run_remote_cli(config, workspace=workspace, session_id=getattr(args, "session_id", None))
+        elif config.runtime_mode == "hybrid":
+            run_hybrid_cli(config, workspace=workspace)
         else:
             run_local_cli(config, workspace=workspace)
         return

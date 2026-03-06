@@ -156,6 +156,186 @@ class RemoteAPITests(unittest.TestCase):
         self.assertIn("File created remotely.", second["response"])
         self.assertTrue((self.workspace / "notes.txt").exists())
 
+    def test_remote_once_approval_does_not_persist_for_next_message(self):
+        client = self._client()
+        session = RemoteSessionClient.create(client, workspace=".")
+        hosted = self.service.sessions[session.session_id]
+        hosted.agent.llm.responses = [
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [{"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello\n"}}],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [{"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello\n"}}],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "Created the file once.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
+        ]
+
+        first = session.send_message("Create the note once")
+        self.assertEqual(first["status"], "approval_required")
+
+        second = session.respond_to_approval(first["approval_id"], True, scope="once")
+        self.assertEqual(second["status"], "ok")
+        self.assertTrue((self.workspace / "notes.txt").exists())
+
+        hosted.agent.llm.responses = [
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [{"name": "write_file", "arguments": {"path": "notes-again.txt", "content": "again\n"}}],
+                "done": False,
+                "native_tools_supported": True,
+            }
+        ]
+
+        third = session.send_message("Create another note")
+        self.assertEqual(third["status"], "approval_required")
+
+    def test_remote_tool_scope_approval_persists_for_same_tool(self):
+        client = self._client()
+        session = RemoteSessionClient.create(client, workspace=".")
+        hosted = self.service.sessions[session.session_id]
+        hosted.agent.llm.responses = [
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [{"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello\n"}}],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [{"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello\n"}}],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "Created the first file.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
+        ]
+
+        first = session.send_message("Create the first note")
+        self.assertEqual(first["status"], "approval_required")
+
+        second = session.respond_to_approval(first["approval_id"], True, scope="tool")
+        self.assertEqual(second["status"], "ok")
+        self.assertTrue((self.workspace / "notes.txt").exists())
+
+        hosted.agent.llm.responses = [
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [{"name": "write_file", "arguments": {"path": "notes-two.txt", "content": "two\n"}}],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "Created the second file without another prompt.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
+        ]
+
+        third = session.send_message("Create the second note")
+        self.assertEqual(third["status"], "ok")
+        self.assertIn("without another prompt", third["response"])
+        self.assertTrue((self.workspace / "notes-two.txt").exists())
+
+    def test_remote_all_scope_approval_enables_session_auto_permission(self):
+        client = self._client()
+        session = RemoteSessionClient.create(client, workspace=".")
+        hosted = self.service.sessions[session.session_id]
+        hosted.agent.llm.responses = [
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [{"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello\n"}}],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [{"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello\n"}}],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "Created the first file.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
+        ]
+
+        first = session.send_message("Create the first note")
+        self.assertEqual(first["status"], "approval_required")
+
+        second = session.respond_to_approval(first["approval_id"], True, scope="all")
+        self.assertEqual(second["status"], "ok")
+        self.assertTrue(hosted.agent.permissions.auto_approve)
+        self.assertTrue(session.get_config()["auto_permission"])
+
+        hosted.agent.llm.responses = [
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [
+                    {
+                        "name": "run_command",
+                        "arguments": {
+                            "command": "python --version"
+                        },
+                    }
+                ],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "Ran the command without another prompt.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
+        ]
+
+        third = session.send_message("Run a command now")
+        self.assertEqual(third["status"], "ok")
+        self.assertIn("without another prompt", third["response"])
+        history = session.get_history()
+        self.assertEqual(history["actions"][-1]["action"], "command")
+        self.assertEqual(history["actions"][-1]["target"], "python --version")
+
+    def test_hosted_sessions_use_restricted_run_command_policy_by_default(self):
+        session = RemoteSessionClient.create(self._client(), workspace=".")
+        hosted = self.service.sessions[session.session_id]
+        run_command = hosted.agent.tool_registry.get("run_command")
+
+        self.assertIsNotNone(run_command)
+        self.assertEqual(getattr(run_command, "execution_mode", None), "restricted")
+
     def test_remote_config_and_model_switch(self):
         client = self._client()
         session = RemoteSessionClient.create(client, workspace=".")
