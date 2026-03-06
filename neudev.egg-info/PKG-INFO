@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: neudev
+Version: 1.0.0
+Summary: NeuDev - Advanced AI Coding Agent powered by Ollama
+Author: NeuDev
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.10
+Requires-Dist: ollama>=0.4.0
+Requires-Dist: rich>=14.0.0
+Requires-Dist: prompt_toolkit>=3.0.0
+Dynamic: author
+Dynamic: classifier
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

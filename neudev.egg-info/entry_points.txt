@@ -1,0 +1,2 @@
+[console_scripts]
+neu = neudev.cli:main

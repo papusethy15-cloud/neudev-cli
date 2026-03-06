@@ -1,0 +1,120 @@
+"""Search files by name/pattern tool for NeuDev."""
+
+import fnmatch
+import os
+from pathlib import Path
+from datetime import datetime
+
+from neudev.tools.base import BaseTool, ToolError
+
+
+# Default directories/patterns to exclude from search
+DEFAULT_EXCLUDES = {
+    ".git", "__pycache__", "node_modules", ".venv", "venv",
+    ".env", ".idea", ".vscode", "dist", "build", ".tox",
+    "*.pyc", "*.pyo", "*.egg-info",
+}
+
+
+class SearchFilesTool(BaseTool):
+    """Search for files by name or glob pattern."""
+
+    @property
+    def name(self) -> str:
+        return "search_files"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Search for files and directories by name or glob pattern within a "
+            "directory. Returns matching file paths with sizes and modification "
+            "times. Useful for finding specific files in a project."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "directory": {
+                    "type": "string",
+                    "description": "Directory to search within.",
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern to match (e.g., '*.py', 'test_*', '*.js').",
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "description": "Maximum directory depth to search. Default 10.",
+                },
+                "file_type": {
+                    "type": "string",
+                    "enum": ["file", "directory", "any"],
+                    "description": "Filter by type. Default 'file'.",
+                },
+            },
+            "required": ["directory", "pattern"],
+        }
+
+    def execute(
+        self,
+        directory: str,
+        pattern: str,
+        max_depth: int = 10,
+        file_type: str = "file",
+        **kwargs,
+    ) -> str:
+        dirpath = Path(directory).resolve()
+
+        if not dirpath.exists():
+            raise ToolError(f"Directory not found: {dirpath}")
+        if not dirpath.is_dir():
+            raise ToolError(f"Not a directory: {dirpath}")
+
+        matches = []
+        max_results = 50
+
+        for root, dirs, files in os.walk(dirpath):
+            # Calculate depth
+            depth = len(Path(root).relative_to(dirpath).parts)
+            if depth > max_depth:
+                dirs.clear()
+                continue
+
+            # Exclude common directories
+            dirs[:] = [d for d in dirs if d not in DEFAULT_EXCLUDES]
+
+            items = []
+            if file_type in ("file", "any"):
+                items.extend((f, "file") for f in files)
+            if file_type in ("directory", "any"):
+                items.extend((d, "dir") for d in dirs)
+
+            for name, kind in items:
+                if fnmatch.fnmatch(name, pattern):
+                    full_path = Path(root) / name
+                    try:
+                        stat = full_path.stat()
+                        size = stat.st_size if kind == "file" else 0
+                        modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                    except OSError:
+                        size = 0
+                        modified = "unknown"
+
+                    rel_path = full_path.relative_to(dirpath)
+                    matches.append(f"  {kind:4s}  {size:>8d}B  {modified}  {rel_path}")
+
+                    if len(matches) >= max_results:
+                        break
+            if len(matches) >= max_results:
+                break
+
+        if not matches:
+            return f"No matches found for '{pattern}' in {dirpath}"
+
+        header = f"Found {len(matches)} match(es) for '{pattern}' in {dirpath}:"
+        if len(matches) >= max_results:
+            header += f" (showing first {max_results})"
+
+        return header + "\n" + "\n".join(matches)
