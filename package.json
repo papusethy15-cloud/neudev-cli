@@ -1,0 +1,29 @@
+{
+  "name": "neudev-cli",
+  "version": "1.0.0",
+  "description": "NeuDev CLI launcher for npm users",
+  "bin": {
+    "neu": "bin/neu.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/npm-postinstall.js",
+    "postuninstall": "node scripts/npm-uninstall.js"
+  },
+  "files": [
+    "bin",
+    "neudev",
+    "scripts/npm-postinstall.js",
+    "scripts/npm-uninstall.js",
+    "README.md",
+    "requirements.txt",
+    "setup.py"
+  ],
+  "keywords": [
+    "ai",
+    "cli",
+    "coding-agent",
+    "ollama",
+    "lightning"
+  ],
+  "license": "MIT"
+}

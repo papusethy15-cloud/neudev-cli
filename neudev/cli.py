@@ -22,7 +22,7 @@ from rich.theme import Theme
 
 from neudev import __app_name__, __version__
 from neudev.agent import Agent
-from neudev.config import CONFIG_DIR, HISTORY_FILE, NeuDevConfig
+from neudev.config import CONFIG_DIR, CONFIG_FILE, HISTORY_FILE, NeuDevConfig
 from neudev.hosted_llm import HostedLLMClient
 from neudev.llm import ConnectionError as OllamaConnectionError
 from neudev.llm import LLMError, ModelNotFoundError
@@ -432,6 +432,89 @@ def run_login_setup(args: argparse.Namespace | None = None) -> None:
         table.add_row("WebSocket URL", websocket_base_url)
     console.print(table)
     console.print("  [dim]Environment variables still override saved values: NEUDEV_API_BASE_URL, NEUDEV_API_KEY, NEUDEV_WS_BASE_URL.[/dim]")
+    console.print()
+
+
+def run_auth_status() -> None:
+    """Show stored hosted authentication settings."""
+    config = NeuDevConfig.load()
+    console.print()
+    table = Table(
+        title="[bold bright_cyan]🔐 Hosted Auth Status[/bold bright_cyan]",
+        show_header=False,
+        border_style="bright_blue",
+        padding=(0, 1),
+        expand=False,
+        width=min(console.width, 78),
+    )
+    table.add_column("Key", style="muted")
+    table.add_column("Value", style="bold white")
+    table.add_row("Config File", str(CONFIG_FILE))
+    table.add_row("Runtime", config.runtime_mode)
+    table.add_row("API Base URL", config.api_base_url or "not set")
+    table.add_row("API Key", "saved" if config.api_key else "not set")
+    table.add_row("WebSocket URL", config.websocket_base_url or "not set")
+    console.print(table)
+    console.print("  [dim]Environment variables override saved values when present.[/dim]")
+    console.print()
+
+
+def run_logout(args: argparse.Namespace | None = None) -> None:
+    """Clear saved hosted credentials."""
+    config = NeuDevConfig.load()
+    clear_all = bool(getattr(args, "all", False))
+    updates = {"api_key": ""}
+    if clear_all:
+        updates["api_base_url"] = ""
+        updates["websocket_base_url"] = ""
+    config.update(**updates)
+
+    console.print()
+    if clear_all:
+        console.print("  [success]✅ Cleared the saved API key, API base URL, and WebSocket URL.[/success]")
+    else:
+        console.print("  [success]✅ Cleared the saved API key.[/success]")
+    console.print(f"  [dim]Config file: {CONFIG_FILE}[/dim]")
+    console.print()
+
+
+def run_uninstall(args: argparse.Namespace | None = None) -> None:
+    """Show uninstall commands and optionally purge local config."""
+    args = args or argparse.Namespace(purge_config=False, yes=False)
+    if getattr(args, "purge_config", False):
+        removed = []
+        for path in (CONFIG_FILE, HISTORY_FILE):
+            if path.exists():
+                path.unlink()
+                removed.append(str(path))
+        if CONFIG_DIR.exists():
+            try:
+                next(CONFIG_DIR.iterdir())
+            except StopIteration:
+                CONFIG_DIR.rmdir()
+        console.print()
+        if removed:
+            console.print("  [success]✅ Removed local NeuDev config files.[/success]")
+            for path in removed:
+                console.print(f"  [dim]{path}[/dim]")
+        else:
+            console.print("  [dim]No local NeuDev config files were present.[/dim]")
+        console.print()
+
+    console.print(
+        Panel(
+            "[bold bright_yellow]Remove the CLI package with the installer you used:[/bold bright_yellow]\n\n"
+            "[white]npm uninstall -g neudev-cli[/white]\n"
+            "[white]python -m pip uninstall neudev[/white]\n"
+            "[white]py -m pip uninstall neudev[/white]\n\n"
+            "[dim]If you also want to clear saved credentials and command history, run:[/dim]\n"
+            "[white]neu uninstall --purge-config[/white]",
+            border_style="bright_blue",
+            title="[bold bright_cyan]🧹 Uninstall NeuDev[/bold bright_cyan]",
+            padding=(1, 2),
+            expand=False,
+        )
+    )
     console.print()
 
 
@@ -1403,6 +1486,20 @@ def build_parser() -> argparse.ArgumentParser:
     login_parser.add_argument("--api-key", default=None, help="Hosted NeuDev API key to save in local config")
     login_parser.add_argument("--ws-base-url", default=None, help="Optional hosted WebSocket URL to save in local config")
 
+    auth_parser = subparsers.add_parser("auth", help="Manage hosted API credentials and saved connection settings")
+    auth_subparsers = auth_parser.add_subparsers(dest="auth_command")
+    auth_login_parser = auth_subparsers.add_parser("login", help="Save hosted API settings in local config")
+    auth_login_parser.add_argument("--runtime", choices=["remote", "hybrid"], default="remote", help="Default runtime to store with the hosted credentials")
+    auth_login_parser.add_argument("--api-base-url", default=None, help="Hosted NeuDev API base URL to save in local config")
+    auth_login_parser.add_argument("--api-key", default=None, help="Hosted NeuDev API key to save in local config")
+    auth_login_parser.add_argument("--ws-base-url", default=None, help="Optional hosted WebSocket URL to save in local config")
+    auth_subparsers.add_parser("status", help="Show saved hosted auth settings")
+    auth_logout_parser = auth_subparsers.add_parser("logout", help="Clear the saved hosted API key")
+    auth_logout_parser.add_argument("--all", action="store_true", help="Also clear the saved hosted API and WebSocket URLs")
+
+    uninstall_parser = subparsers.add_parser("uninstall", help="Show uninstall commands and optionally remove local NeuDev config")
+    uninstall_parser.add_argument("--purge-config", action="store_true", help="Remove ~/.neudev config and history files")
+
     subparsers.add_parser("version", help="Show version")
     return parser
 
@@ -1446,6 +1543,21 @@ def main() -> None:
 
     if args.command == "login":
         run_login_setup(args)
+        return
+
+    if args.command == "auth":
+        if args.auth_command in (None, "status"):
+            run_auth_status()
+        elif args.auth_command == "login":
+            run_login_setup(args)
+        elif args.auth_command == "logout":
+            run_logout(args)
+        else:
+            parser.error(f"Unknown auth subcommand: {args.auth_command}")
+        return
+
+    if args.command == "uninstall":
+        run_uninstall(args)
         return
 
     if args.command == "serve":

@@ -61,6 +61,27 @@ export NEUDEV_HOSTED_RUN_COMMAND_MODE=restricted
 bash scripts/lightning_entrypoint.sh
 ```
 
+## Local user install
+
+Users connecting to Lightning can install the local CLI with either:
+
+```bash
+npm install -g neudev-cli
+```
+
+or:
+
+```bash
+python -m pip install "git+https://github.com/papusethy15-cloud/neudev-cli.git"
+```
+
+Then save hosted auth once:
+
+```bash
+neu auth login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
+neu run --runtime remote
+```
+
 ## Hybrid safety controls
 
 Hybrid inference now enforces two client-side safeguards before local context is sent to Lightning:

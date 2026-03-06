@@ -147,7 +147,18 @@ Official references:
 
 ## 💻 Local Install and Development
 
-### 1. Install the CLI from this repository
+### 1. Install the CLI on a local machine
+
+Node.js global install:
+
+```bash
+npm install -g neudev-cli
+neu version
+```
+
+The npm package installs a thin `neu` launcher and bootstraps the Python runtime underneath. If the Python package already exists locally, the npm install path reinstalls or upgrades it.
+
+Python install from this repository:
 
 Windows PowerShell or `cmd`:
 
@@ -169,21 +180,27 @@ python3 -m pip install -e .
 neu version
 ```
 
-If you want to install straight from git without cloning first:
+If you want the Python install straight from git without cloning first:
 
 ```bash
 python -m pip install "git+https://github.com/papusethy15-cloud/neudev-cli.git"
 ```
 
-### 2. One-time hosted login on a user machine
+### 2. One-time hosted auth setup on a user machine
 
 If the user will connect to Lightning in `remote` or `hybrid` mode, store the hosted endpoint and API key once:
 
 ```bash
-neu login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
+neu auth login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
 ```
 
 That command saves the values in `~/.neudev/config.json`, so the user does not need to pass `--api-key` on every run.
+
+Short alias:
+
+```bash
+neu login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
+```
 
 You can still override saved settings per session with environment variables:
 
@@ -248,7 +265,8 @@ neu run --runtime local --model qwen2.5-coder:7b
 Remote client runtime:
 
 ```bash
-neu login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
+neu auth login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
+neu auth status
 neu run --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
 neu run --runtime remote --transport auto
 neu run --runtime remote --session-id YOUR_SESSION_ID
@@ -266,6 +284,17 @@ Version:
 
 ```bash
 neu version
+```
+
+Auth and cleanup:
+
+```bash
+neu auth login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
+neu auth status
+neu auth logout
+neu auth logout --all
+neu uninstall
+neu uninstall --purge-config
 ```
 
 Slash commands:
@@ -292,7 +321,7 @@ NeuDev stores config in `~/.neudev/config.json`.
 The fastest way to create that config for hosted usage is:
 
 ```bash
-neu login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
+neu auth login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
 ```
 
 Example:
@@ -343,6 +372,13 @@ Environment variables override saved config values:
 - `NEUDEV_API_BASE_URL`
 - `NEUDEV_API_KEY`
 - `NEUDEV_WS_BASE_URL`
+
+Useful local account commands:
+
+- `neu auth status`
+- `neu auth logout`
+- `neu auth logout --all`
+- `neu uninstall --purge-config`
 
 ## ☁️ Lightning Deployment
 
