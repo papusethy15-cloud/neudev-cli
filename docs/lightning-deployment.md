@@ -24,6 +24,8 @@ Copy `.env.lightning.example` and set at least:
 - `NEUDEV_SESSION_STORE`
 - `NEUDEV_OLLAMA_HOST`
 
+`.env.lightning.example` is intended for direct Lightning shell startup. If you use Docker, override the workspace and session-store paths for the container filesystem.
+
 Optional controls:
 
 - `NEUDEV_HOSTED_RUN_COMMAND_MODE=restricted|permissive|disabled`
@@ -43,6 +45,9 @@ docker build -t neudev-lightning .
 ```bash
 docker run --rm -it \
   --env-file .env.lightning.example \
+  -e NEUDEV_WORKSPACE=/workspace/neu-dev \
+  -e NEUDEV_SESSION_STORE=/workspace/.neudev/hosted_sessions \
+  -e NEUDEV_OLLAMA_HOST=http://host.docker.internal:11434 \
   -p 8765:8765 \
   -p 8766:8766 \
   neudev-lightning
@@ -58,8 +63,11 @@ export NEUDEV_WORKSPACE="$PWD"
 export NEUDEV_SESSION_STORE="$HOME/.neudev/hosted_sessions"
 export NEUDEV_OLLAMA_HOST="http://127.0.0.1:11434"
 export NEUDEV_HOSTED_RUN_COMMAND_MODE=restricted
+export NEUDEV_BOOTSTRAP=1
 bash scripts/lightning_entrypoint.sh
 ```
+
+The entrypoint now launches `python -m neudev.cli` from the repo root, which avoids failures caused by stale global `neu` installs in another Python environment.
 
 ## Local user install
 

@@ -19,7 +19,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt setup.py README.md /workspace/neu-dev/
+COPY requirements.txt setup.py pyproject.toml README.md LICENSE /workspace/neu-dev/
 COPY neudev /workspace/neu-dev/neudev
 COPY scripts /workspace/neu-dev/scripts
 COPY docs /workspace/neu-dev/docs

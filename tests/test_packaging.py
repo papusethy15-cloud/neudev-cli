@@ -35,6 +35,12 @@ class PackagingTests(unittest.TestCase):
         for path in expected:
             self.assertTrue(path.exists(), f"Missing release asset: {path}")
 
+    def test_lightning_entrypoint_uses_repo_python_module(self):
+        script = (ROOT / "scripts" / "lightning_entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn('cd "$ROOT_DIR"', script)
+        self.assertIn('-m neudev.cli serve', script)
+        self.assertNotIn('set -- neu serve', script)
+
 
 if __name__ == "__main__":
     unittest.main()

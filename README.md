@@ -467,8 +467,11 @@ Or run directly inside Lightning Studio:
 set -a
 source .env.lightning
 set +a
+export NEUDEV_BOOTSTRAP=1
 bash scripts/lightning_entrypoint.sh
 ```
+
+After the first successful bootstrap, set `NEUDEV_BOOTSTRAP=0` for normal restarts.
 
 After you push new commits from local development, update Lightning with:
 
@@ -477,6 +480,8 @@ cd /path/to/neudev-cli
 git pull origin main
 bash scripts/lightning_entrypoint.sh
 ```
+
+Direct Lightning shell startup now runs `python -m neudev.cli` from the cloned repo, so it does not depend on an old globally installed `neu` binary from another environment.
 
 ### Release and publish
 

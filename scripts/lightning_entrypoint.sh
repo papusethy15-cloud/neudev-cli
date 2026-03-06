@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 NEUDEV_HOST="${NEUDEV_HOST:-0.0.0.0}"
 NEUDEV_HTTP_PORT="${NEUDEV_HTTP_PORT:-8765}"
 NEUDEV_WS_PORT="${NEUDEV_WS_PORT:-8766}"
@@ -25,9 +26,22 @@ if [[ "$NEUDEV_BOOTSTRAP" == "1" ]]; then
   bash "$ROOT_DIR/scripts/lightning_bootstrap.sh"
 fi
 
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "Python runtime '$PYTHON_BIN' was not found." >&2
+  exit 1
+fi
+
+if ! "$PYTHON_BIN" -c "import rich, prompt_toolkit, websockets" >/dev/null 2>&1; then
+  echo "Missing Python dependencies for NeuDev." >&2
+  echo "Run '$PYTHON_BIN -m pip install -e .' from $ROOT_DIR or set NEUDEV_BOOTSTRAP=1." >&2
+  exit 1
+fi
+
+cd "$ROOT_DIR"
+
 mkdir -p "$NEUDEV_SESSION_STORE"
 
-set -- neu serve \
+set -- "$PYTHON_BIN" -m neudev.cli serve \
   --host "$NEUDEV_HOST" \
   --port "$NEUDEV_HTTP_PORT" \
   --workspace "$NEUDEV_WORKSPACE" \
