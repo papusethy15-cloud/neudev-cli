@@ -111,6 +111,12 @@ class SearchFilesTool(BaseTool):
                 break
 
         if not matches:
+            fuzzy_matches = self._find_fuzzy_matches(dirpath, pattern, max_depth, file_type, max_results)
+            if fuzzy_matches:
+                return (
+                    f"No exact glob matches for '{pattern}' in {dirpath}.\n"
+                    f"Automatic fallback: fuzzy name matches:\n" + "\n".join(fuzzy_matches)
+                )
             return f"No matches found for '{pattern}' in {dirpath}"
 
         header = f"Found {len(matches)} match(es) for '{pattern}' in {dirpath}:"
@@ -118,3 +124,42 @@ class SearchFilesTool(BaseTool):
             header += f" (showing first {max_results})"
 
         return header + "\n" + "\n".join(matches)
+
+    def _find_fuzzy_matches(
+        self,
+        dirpath: Path,
+        pattern: str,
+        max_depth: int,
+        file_type: str,
+        max_results: int,
+    ) -> list[str]:
+        query = pattern.replace("*", "").replace("?", "").strip().lower()
+        if not query:
+            return []
+
+        matches = []
+        for root, dirs, files in os.walk(dirpath):
+            depth = len(Path(root).relative_to(dirpath).parts)
+            if depth > max_depth:
+                dirs.clear()
+                continue
+
+            dirs[:] = [d for d in dirs if d not in DEFAULT_EXCLUDES]
+
+            items = []
+            if file_type in ("file", "any"):
+                items.extend((f, "file") for f in files)
+            if file_type in ("directory", "any"):
+                items.extend((d, "dir") for d in dirs)
+
+            for name, kind in items:
+                lowered = name.lower()
+                stem = Path(name).stem.lower()
+                if query not in lowered and query not in stem:
+                    continue
+                rel_path = (Path(root) / name).relative_to(dirpath)
+                matches.append(f"  {kind:4s}  fuzzy match  {rel_path}")
+                if len(matches) >= max_results:
+                    return matches
+
+        return matches

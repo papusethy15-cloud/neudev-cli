@@ -1,0 +1,10 @@
+{
+  "name": "fixture-frontend",
+  "private": true,
+  "dependencies": {
+    "react": "^19.0.0"
+  },
+  "scripts": {
+    "build": "vite build"
+  }
+}

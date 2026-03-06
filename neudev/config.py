@@ -1,15 +1,16 @@
 """Configuration management for NeuDev."""
 
 import json
-import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Optional
 
 
 CONFIG_DIR = Path.home() / ".neudev"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 HISTORY_FILE = CONFIG_DIR / "history.txt"
+VALID_AGENT_MODES = {"single", "team", "parallel"}
+VALID_RUNTIME_MODES = {"local", "remote"}
+VALID_STREAM_TRANSPORTS = {"auto", "sse", "websocket"}
 
 
 @dataclass
@@ -17,7 +18,7 @@ class NeuDevConfig:
     """NeuDev configuration."""
 
     # LLM settings
-    model: str = "qwen3.5:0.8b"
+    model: str = "auto"
     temperature: float = 0.7
     max_tokens: int = 4096
     ollama_host: str = "http://localhost:11434"
@@ -28,9 +29,34 @@ class NeuDevConfig:
 
     # Session settings
     auto_permission: bool = False
+    multi_agent: bool = True
+    agent_mode: str = ""
+    runtime_mode: str = "local"
+    api_base_url: str = ""
+    api_key: str = ""
+    remote_workspace: str = ""
+    websocket_base_url: str = ""
+    stream_transport: str = "auto"
 
     # Display settings
     show_thinking: bool = False
+    response_language: str = "English"
+
+    def __post_init__(self) -> None:
+        """Normalize derived config fields for backward compatibility."""
+        mode = (self.agent_mode or "").strip().lower()
+        if mode not in VALID_AGENT_MODES:
+            mode = "parallel" if self.multi_agent else "single"
+        self.agent_mode = mode
+        self.multi_agent = mode != "single"
+        runtime_mode = (self.runtime_mode or "local").strip().lower()
+        if runtime_mode not in VALID_RUNTIME_MODES:
+            runtime_mode = "local"
+        self.runtime_mode = runtime_mode
+        stream_transport = (self.stream_transport or "auto").strip().lower()
+        if stream_transport not in VALID_STREAM_TRANSPORTS:
+            stream_transport = "auto"
+        self.stream_transport = stream_transport
 
     @classmethod
     def load(cls) -> "NeuDevConfig":
@@ -39,6 +65,8 @@ class NeuDevConfig:
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                if "agent_mode" not in data and "multi_agent" in data:
+                    data["agent_mode"] = "parallel" if data.get("multi_agent") else "single"
                 return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
             except (json.JSONDecodeError, TypeError):
                 pass
@@ -50,9 +78,49 @@ class NeuDevConfig:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(asdict(self), f, indent=2)
 
-    def update(self, **kwargs) -> None:
-        """Update config values."""
+    def clone(self) -> "NeuDevConfig":
+        """Return an in-memory copy without touching disk."""
+        return NeuDevConfig(**asdict(self))
+
+    def apply_runtime_updates(self, *, persist: bool, **kwargs) -> None:
+        """Apply config updates, optionally persisting them to disk."""
+        if "agent_mode" in kwargs:
+            mode = str(kwargs["agent_mode"]).strip().lower()
+            if mode not in VALID_AGENT_MODES:
+                raise ValueError(
+                    f"Invalid agent_mode '{kwargs['agent_mode']}'. "
+                    f"Expected one of: {', '.join(sorted(VALID_AGENT_MODES))}"
+                )
+            kwargs["agent_mode"] = mode
+            kwargs["multi_agent"] = mode != "single"
+        elif "multi_agent" in kwargs:
+            kwargs["agent_mode"] = "parallel" if kwargs["multi_agent"] else "single"
+
+        if "runtime_mode" in kwargs:
+            mode = str(kwargs["runtime_mode"]).strip().lower()
+            if mode not in VALID_RUNTIME_MODES:
+                raise ValueError(
+                    f"Invalid runtime_mode '{kwargs['runtime_mode']}'. "
+                    f"Expected one of: {', '.join(sorted(VALID_RUNTIME_MODES))}"
+                )
+            kwargs["runtime_mode"] = mode
+
+        if "stream_transport" in kwargs:
+            transport = str(kwargs["stream_transport"]).strip().lower()
+            if transport not in VALID_STREAM_TRANSPORTS:
+                raise ValueError(
+                    f"Invalid stream_transport '{kwargs['stream_transport']}'. "
+                    f"Expected one of: {', '.join(sorted(VALID_STREAM_TRANSPORTS))}"
+                )
+            kwargs["stream_transport"] = transport
+
         for key, value in kwargs.items():
             if hasattr(self, key):
                 setattr(self, key, value)
-        self.save()
+        self.__post_init__()
+        if persist:
+            self.save()
+
+    def update(self, **kwargs) -> None:
+        """Update config values and persist them."""
+        self.apply_runtime_updates(persist=True, **kwargs)

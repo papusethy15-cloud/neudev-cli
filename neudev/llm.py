@@ -8,6 +8,16 @@ import urllib.error
 from typing import Generator, Optional
 
 from neudev.config import NeuDevConfig
+from neudev.model_routing import (
+    AgentTeam,
+    LEGACY_DEFAULT_MODEL,
+    build_agent_team,
+    get_model_role_label,
+    is_chat_capable_model,
+    preview_best_model,
+    rank_models,
+    should_enable_thinking,
+)
 from neudev.tool_call_parser import extract_text_tool_calls
 
 
@@ -38,6 +48,8 @@ class OllamaClient:
         self.config = config
         self.model = config.model
         self.base_url = config.ollama_host.rstrip("/")
+        self.last_used_model: str | None = None
+        self.last_route_reason: str = ""
         self._test_connection()
 
     def _test_connection(self) -> None:
@@ -130,39 +142,46 @@ class OllamaClient:
     def list_models(self) -> list[dict]:
         """List all downloaded Ollama models."""
         try:
-            response = self._api_get("/api/tags")
-            models = []
-            for m in response.get("models", []):
-                name = m.get("name", "unknown")
-                models.append({
-                    "name": name,
-                    "size": m.get("size", 0),
-                    "modified": m.get("modified_at", ""),
-                    "active": name == self.model,
-                })
+            models = self._fetch_installed_models()
+            active_name = self.last_used_model if self.model == "auto" else self._match_model_name(
+                self.model,
+                [m["name"] for m in models],
+                raise_on_missing=False,
+            )
+            for model in models:
+                model["active"] = model["name"] == active_name
+                model["role"] = get_model_role_label(model["name"])
             return models
         except Exception as e:
             raise LLMError(f"Failed to list models: {e}")
 
     def switch_model(self, model_name: str) -> bool:
         """Switch to a different model."""
-        models = self.list_models()
+        requested = model_name.strip()
+        if requested.lower() == "auto":
+            self.model = "auto"
+            self.last_route_reason = "automatic task-based routing"
+            preview, _ = self.preview_auto_model()
+            self.last_used_model = preview
+            self.config.update(model="auto")
+            return True
+
+        models = self._fetch_installed_models()
         available = [m["name"] for m in models]
 
-        matched = None
-        for name in available:
-            if name == model_name or name.startswith(model_name):
-                matched = name
-                break
+        matched = self._match_model_name(requested, available)
 
         if matched is None:
             raise ModelNotFoundError(
-                f"Model '{model_name}' not found.\n"
+                f"Model '{requested}' not found.\n"
                 f"Available models: {', '.join(available)}\n"
-                f"Download with: ollama pull {model_name}"
+                f"Download with: ollama pull {requested}"
             )
 
+        self._ensure_chat_capable_model(matched)
         self.model = matched
+        self.last_used_model = matched
+        self.last_route_reason = "manual selection"
         self.config.update(model=matched)
         return True
 
@@ -172,6 +191,7 @@ class OllamaClient:
         tools: Optional[list[dict]] = None,
         stream: bool = False,
         think: bool = False,
+        model_name: Optional[str] = None,
     ):
         """Send a chat request to Ollama.
 
@@ -186,7 +206,7 @@ class OllamaClient:
             If stream=True: Generator yielding response chunks
         """
         data = {
-            "model": self.model,
+            "model": model_name or self.model,
             "messages": messages,
             "stream": stream,
             "options": {
@@ -244,11 +264,45 @@ class OllamaClient:
         except Exception as e:
             raise LLMError(f"Stream interrupted: {e}")
 
+    def chat_with_fallback(
+        self,
+        messages: list[dict],
+        think: bool = False,
+        preferred_models: Optional[list[str]] = None,
+        route_reason: Optional[str] = None,
+    ) -> dict:
+        """Send a plain chat request with runtime model fallback."""
+        candidate_models, route_reason = self._resolve_candidate_models(
+            messages,
+            tools=None,
+            preferred_models=preferred_models,
+            route_reason=route_reason,
+        )
+        response, selected_model, think_enabled, _, fallback_used = self._chat_across_candidates(
+            messages,
+            candidate_models,
+            tools=None,
+            think=think,
+        )
+
+        resolved_reason = self._resolve_route_reason(route_reason, fallback_used)
+        self.last_used_model = selected_model
+        self.last_route_reason = resolved_reason
+
+        result = dict(response)
+        result["model"] = selected_model
+        result["route_reason"] = resolved_reason
+        result["thinking_enabled"] = think_enabled
+        result["fallback_used"] = fallback_used
+        return result
+
     def chat_with_tools(
         self,
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         think: bool = False,
+        preferred_models: Optional[list[str]] = None,
+        route_reason: Optional[str] = None,
     ) -> dict:
         """Chat and parse tool calls from response.
 
@@ -258,13 +312,21 @@ class OllamaClient:
             - tool_calls: list[dict] (tool calls if any)
             - done: bool (whether agent is done - no more tool calls)
         """
-        native_tools_supported = True
-        try:
-            response = self.chat(messages, tools=tools, stream=False, think=think)
-        except ToolsNotSupportedError:
-            # Retry without tools — model can still chat, just no function calling
-            native_tools_supported = False
-            response = self.chat(messages, tools=None, stream=False, think=think)
+        candidate_models, route_reason = self._resolve_candidate_models(
+            messages,
+            tools,
+            preferred_models=preferred_models,
+            route_reason=route_reason,
+        )
+        response, selected_model, think_enabled, native_tools_supported, fallback_used = self._chat_across_candidates(
+            messages,
+            candidate_models,
+            tools=tools,
+            think=think,
+        )
+        resolved_reason = self._resolve_route_reason(route_reason, fallback_used)
+        self.last_used_model = selected_model
+        self.last_route_reason = resolved_reason
 
         result = {
             "content": "",
@@ -273,6 +335,10 @@ class OllamaClient:
             "done": True,
             "native_tools_supported": native_tools_supported,
             "tool_call_mode": "native",
+            "model": selected_model,
+            "route_reason": resolved_reason,
+            "thinking_enabled": think_enabled,
+            "fallback_used": fallback_used,
         }
 
         message = response.get("message", {})
@@ -309,3 +375,208 @@ class OllamaClient:
                 result["tool_call_mode"] = "text"
 
         return result
+
+    def preview_auto_model(self, messages: Optional[list[dict]] = None, tools: Optional[list[dict]] = None) -> tuple[str | None, str]:
+        """Preview the model auto-routing would currently choose."""
+        available = self._fetch_installed_models()
+        return preview_best_model(available, messages or [], bool(tools))
+
+    def select_agent_team(self, messages: list[dict], tools: Optional[list[dict]] = None) -> AgentTeam:
+        """Select planner/executor/reviewer roles for orchestration."""
+        available = self._fetch_installed_models()
+        if not available:
+            raise ModelNotFoundError("No Ollama models are installed.")
+
+        available_names = [m["name"] for m in available]
+        if self.model != "auto":
+            matched = self._match_model_name(self.model, available_names, raise_on_missing=False)
+            if matched is None and self.model == LEGACY_DEFAULT_MODEL:
+                return build_agent_team(available, messages, bool(tools))
+            if matched is None:
+                raise ModelNotFoundError(
+                    f"Model '{self.model}' not found.\n"
+                    f"Available models: {', '.join(available_names)}"
+                )
+            self._ensure_chat_capable_model(matched)
+            return AgentTeam(
+                planner=matched,
+                executor=matched,
+                reviewer=matched,
+                executor_candidates=(matched,),
+                route_reason="manual selection",
+            )
+
+        try:
+            return build_agent_team(available, messages, bool(tools))
+        except ValueError as e:
+            raise LLMError(str(e))
+
+    def get_display_model(self) -> str:
+        """Describe the configured model mode for UI display."""
+        if self.model != "auto":
+            return self.model
+
+        preview, _ = self.preview_auto_model()
+        target = self.last_used_model or preview
+        return f"auto -> {target}" if target else "auto"
+
+    def _fetch_installed_models(self) -> list[dict]:
+        response = self._api_get("/api/tags")
+        models = []
+        for m in response.get("models", []):
+            name = m.get("name", "unknown")
+            models.append({
+                "name": name,
+                "size": m.get("size", 0),
+                "modified": m.get("modified_at", ""),
+                "active": False,
+            })
+        return models
+
+    def _resolve_candidate_models(
+        self,
+        messages: list[dict],
+        tools: Optional[list[dict]],
+        preferred_models: Optional[list[str]] = None,
+        route_reason: Optional[str] = None,
+    ) -> tuple[list[str], str]:
+        available = self._fetch_installed_models()
+        if not available:
+            raise ModelNotFoundError("No Ollama models are installed.")
+
+        available_names = [m["name"] for m in available]
+
+        if preferred_models:
+            matched = []
+            for name in preferred_models:
+                resolved = self._match_model_name(name, available_names, raise_on_missing=False)
+                if resolved and is_chat_capable_model(resolved) and resolved not in matched:
+                    matched.append(resolved)
+            if matched:
+                fallbacks = self._rank_fallback_models(available, messages, bool(tools), exclude=matched)
+                return matched + fallbacks, route_reason or "role-directed selection"
+
+        if self.model != "auto":
+            matched = self._match_model_name(self.model, available_names, raise_on_missing=False)
+            if matched is not None:
+                self._ensure_chat_capable_model(matched)
+                fallbacks = self._rank_fallback_models(available, messages, bool(tools), exclude=[matched])
+                return [matched] + fallbacks, "manual selection"
+            if self.model == LEGACY_DEFAULT_MODEL:
+                ranked, route_reason = rank_models(available, messages, bool(tools))
+                if not ranked:
+                    raise LLMError("No chat-capable Ollama models are installed.")
+                return [m["name"] for m in ranked], f"auto fallback from legacy default; {route_reason}"
+            raise ModelNotFoundError(
+                f"Model '{self.model}' not found.\n"
+                f"Available models: {', '.join(available_names)}"
+            )
+
+        ranked, route_reason = rank_models(available, messages, bool(tools))
+        if not ranked:
+            raise LLMError("No chat-capable Ollama models are installed.")
+        return [m["name"] for m in ranked], route_reason
+
+    @staticmethod
+    def _ensure_chat_capable_model(model_name: str) -> None:
+        if is_chat_capable_model(model_name):
+            return
+        raise LLMError(
+            f"Model '{model_name}' is embeddings-only and cannot be used as the interactive chat agent.\n"
+            "Use /models auto or switch to a chat-capable coding model."
+        )
+
+    def _chat_across_candidates(
+        self,
+        messages: list[dict],
+        candidate_models: list[str],
+        *,
+        tools: Optional[list[dict]],
+        think: bool,
+    ) -> tuple[dict, str, bool, bool, bool]:
+        """Try candidate models in order until one succeeds."""
+        if not candidate_models:
+            raise LLMError("No compatible model could be selected for this request.")
+
+        failures: list[str] = []
+        toolless_candidates: list[str] = []
+
+        for index, model_name in enumerate(candidate_models):
+            think_for_model = should_enable_thinking(model_name, think)
+            try:
+                response = self.chat(
+                    messages,
+                    tools=tools,
+                    stream=False,
+                    think=think_for_model,
+                    model_name=model_name,
+                )
+                return response, model_name, think_for_model, True, index > 0
+            except ToolsNotSupportedError as e:
+                failures.append(f"{model_name}: {e}")
+                if tools:
+                    toolless_candidates.append(model_name)
+                continue
+            except ConnectionError:
+                raise
+            except (ModelNotFoundError, LLMError) as e:
+                failures.append(f"{model_name}: {e}")
+                continue
+
+        if tools:
+            for model_name in toolless_candidates:
+                think_for_model = should_enable_thinking(model_name, think)
+                try:
+                    response = self.chat(
+                        messages,
+                        tools=None,
+                        stream=False,
+                        think=think_for_model,
+                        model_name=model_name,
+                    )
+                    fallback_used = model_name != candidate_models[0] or len(candidate_models) > 1
+                    return response, model_name, think_for_model, False, fallback_used
+                except ConnectionError:
+                    raise
+                except (ModelNotFoundError, LLMError, ToolsNotSupportedError) as e:
+                    failures.append(f"{model_name} (plain chat): {e}")
+                    continue
+
+        raise LLMError(self._format_candidate_failure_message(failures))
+
+    @staticmethod
+    def _format_candidate_failure_message(failures: list[str]) -> str:
+        """Summarize the candidate failures after runtime fallback is exhausted."""
+        if not failures:
+            return "No compatible model could be selected for this request."
+        shown = failures[:3]
+        suffix = "" if len(failures) <= 3 else f" (+{len(failures) - 3} more)"
+        return f"All fallback models failed. Tried: {' | '.join(shown)}{suffix}"
+
+    def _rank_fallback_models(
+        self,
+        available: list[dict],
+        messages: list[dict],
+        has_tools: bool,
+        *,
+        exclude: list[str],
+    ) -> list[str]:
+        """Return ranked fallback models excluding already-preferred entries."""
+        ranked, _ = rank_models(available, messages, has_tools)
+        excluded = set(exclude)
+        return [model["name"] for model in ranked if model["name"] not in excluded]
+
+    @staticmethod
+    def _resolve_route_reason(route_reason: str, fallback_used: bool) -> str:
+        if fallback_used:
+            return f"{route_reason}; runtime model fallback"
+        return route_reason
+
+    @staticmethod
+    def _match_model_name(model_name: str, available: list[str], raise_on_missing: bool = True) -> str | None:
+        for name in available:
+            if name == model_name or name.startswith(model_name):
+                return name
+        if raise_on_missing:
+            raise ModelNotFoundError(f"Model '{model_name}' not found.")
+        return None

@@ -81,13 +81,56 @@ class GrepSearchTool(BaseTool):
         if not dirpath.exists():
             raise ToolError(f"Directory not found: {dirpath}")
 
-        # Compile pattern
+        matches, files_searched = self._search_contents(
+            dirpath,
+            query,
+            is_regex=is_regex,
+            case_insensitive=case_insensitive,
+            includes=includes,
+        )
+        if matches:
+            header = f"Found {len(matches)} match(es) for '{query}' ({files_searched} files searched):"
+            if len(matches) >= 50:
+                header += " (showing first 50)"
+            return header + "\n" + "\n".join(matches)
+
+        if not case_insensitive:
+            retry_matches, retry_files = self._search_contents(
+                dirpath,
+                query,
+                is_regex=is_regex,
+                case_insensitive=True,
+                includes=includes,
+            )
+            if retry_matches:
+                return (
+                    f"No exact case-sensitive matches for '{query}' in {dirpath}.\n"
+                    "Automatic fallback: case-insensitive matches:\n"
+                    + "\n".join(retry_matches)
+                )
+            files_searched = retry_files
+
+        filename_matches = self._search_filenames(dirpath, query, includes=includes)
+        if filename_matches:
+            return (
+                f"No content matches found for '{query}' in {dirpath} ({files_searched} files searched).\n"
+                "Automatic fallback: related filename matches:\n"
+                + "\n".join(filename_matches)
+            )
+
+        return f"No matches found for '{query}' in {dirpath} ({files_searched} files searched)"
+
+    def _search_contents(
+        self,
+        dirpath: Path,
+        query: str,
+        is_regex: bool,
+        case_insensitive: bool,
+        includes: str | None,
+    ) -> tuple[list[str], int]:
         flags = re.IGNORECASE if case_insensitive else 0
         try:
-            if is_regex:
-                pattern = re.compile(query, flags)
-            else:
-                pattern = re.compile(re.escape(query), flags)
+            pattern = re.compile(query if is_regex else re.escape(query), flags)
         except re.error as e:
             raise ToolError(f"Invalid regex pattern: {e}")
 
@@ -99,18 +142,14 @@ class GrepSearchTool(BaseTool):
             dirs[:] = [d for d in dirs if d not in DEFAULT_EXCLUDES]
 
             for filename in files:
-                # Skip binary files
                 ext = Path(filename).suffix.lower()
                 if ext in BINARY_EXTENSIONS:
                     continue
-
-                # Apply include filter
                 if includes and not fnmatch.fnmatch(filename, includes):
                     continue
 
                 filepath = self.resolve_path(str(Path(root) / filename), must_exist=True)
                 files_searched += 1
-
                 try:
                     with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                         for line_num, line in enumerate(f, 1):
@@ -120,7 +159,6 @@ class GrepSearchTool(BaseTool):
                                 if len(content) > 200:
                                     content = content[:200] + "..."
                                 matches.append(f"  {rel}:{line_num}: {content}")
-
                                 if len(matches) >= max_results:
                                     break
                 except (OSError, UnicodeDecodeError):
@@ -131,11 +169,23 @@ class GrepSearchTool(BaseTool):
             if len(matches) >= max_results:
                 break
 
-        if not matches:
-            return f"No matches found for '{query}' in {dirpath} ({files_searched} files searched)"
+        return matches, files_searched
 
-        header = f"Found {len(matches)} match(es) for '{query}' ({files_searched} files searched):"
-        if len(matches) >= max_results:
-            header += f" (showing first {max_results})"
+    def _search_filenames(self, dirpath: Path, query: str, includes: str | None) -> list[str]:
+        lowered_query = query.lower().strip()
+        if not lowered_query:
+            return []
 
-        return header + "\n" + "\n".join(matches)
+        matches = []
+        for root, dirs, files in os.walk(dirpath):
+            dirs[:] = [d for d in dirs if d not in DEFAULT_EXCLUDES]
+            for filename in files:
+                if includes and not fnmatch.fnmatch(filename, includes):
+                    continue
+                if lowered_query not in filename.lower():
+                    continue
+                rel = (Path(root) / filename).relative_to(dirpath)
+                matches.append(f"  {rel}")
+                if len(matches) >= 20:
+                    return matches
+        return matches
