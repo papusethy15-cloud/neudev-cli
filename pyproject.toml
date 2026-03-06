@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neudev"
+dynamic = ["version"]
+description = "NeuDev - Advanced AI Coding Agent powered by Ollama"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "NeuDev" }]
+keywords = ["ai", "cli", "coding-agent", "ollama", "lightning"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "ollama>=0.4.0",
+  "rich>=14.0.0",
+  "prompt_toolkit>=3.0.0",
+  "websockets>=15.0.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/papusethy15-cloud/neudev-cli"
+Repository = "https://github.com/papusethy15-cloud/neudev-cli"
+Issues = "https://github.com/papusethy15-cloud/neudev-cli/issues"
+
+[project.scripts]
+neu = "neudev.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "neudev.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["neudev*"]

@@ -149,7 +149,14 @@ Official references:
 
 ### 1. Install the CLI on a local machine
 
-Node.js global install:
+Node.js global install from the local repo:
+
+```bash
+npm install -g .
+neu version
+```
+
+After you publish to npm, the same flow becomes:
 
 ```bash
 npm install -g neudev-cli
@@ -252,6 +259,12 @@ python -m pytest -q
 
 At the current state of this repository, both passed during validation.
 
+Packaging checks:
+
+```bash
+npm pack --dry-run
+```
+
 ## 💬 CLI Usage
 
 Local runtime:
@@ -295,6 +308,13 @@ neu auth logout
 neu auth logout --all
 neu uninstall
 neu uninstall --purge-config
+```
+
+Install and release notes:
+
+```bash
+npm install -g .
+python -m pip install .
 ```
 
 Slash commands:
@@ -457,6 +477,34 @@ cd /path/to/neudev-cli
 git pull origin main
 bash scripts/lightning_entrypoint.sh
 ```
+
+### Release and publish
+
+If you want users to install with `npm install -g neudev-cli`, you must publish the npm launcher package first.
+
+Release checklist:
+
+```bash
+python -m unittest discover -s tests -q
+python -m pytest -q
+npm pack --dry-run
+```
+
+Python package build:
+
+```bash
+python -m pip install --upgrade build twine
+python -m build
+python -m twine check dist/*
+```
+
+npm publish:
+
+```bash
+npm publish --access public
+```
+
+Full release notes are in `docs/release.md`.
 
 ### Recommended Lightning bootstrap flow
 

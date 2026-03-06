@@ -66,7 +66,7 @@ bash scripts/lightning_entrypoint.sh
 Users connecting to Lightning can install the local CLI with either:
 
 ```bash
-npm install -g neudev-cli
+npm install -g .
 ```
 
 or:
@@ -80,6 +80,12 @@ Then save hosted auth once:
 ```bash
 neu auth login --runtime remote --api-base-url https://YOUR-HOSTED-ENDPOINT --api-key YOUR_API_KEY
 neu run --runtime remote
+```
+
+If you publish the npm launcher package publicly, users can replace `npm install -g .` with:
+
+```bash
+npm install -g neudev-cli
 ```
 
 ## Hybrid safety controls

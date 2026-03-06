@@ -2,8 +2,23 @@
   "name": "neudev-cli",
   "version": "1.0.0",
   "description": "NeuDev CLI launcher for npm users",
+  "preferGlobal": true,
+  "engines": {
+    "node": ">=18"
+  },
   "bin": {
     "neu": "bin/neu.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/papusethy15-cloud/neudev-cli.git"
+  },
+  "homepage": "https://github.com/papusethy15-cloud/neudev-cli#readme",
+  "bugs": {
+    "url": "https://github.com/papusethy15-cloud/neudev-cli/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "postinstall": "node scripts/npm-postinstall.js",
@@ -11,10 +26,12 @@
   },
   "files": [
     "bin",
-    "neudev",
+    "neudev/**/*.py",
     "scripts/npm-postinstall.js",
     "scripts/npm-uninstall.js",
+    "LICENSE",
     "README.md",
+    "pyproject.toml",
     "requirements.txt",
     "setup.py"
   ],
