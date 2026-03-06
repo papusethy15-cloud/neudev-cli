@@ -5,6 +5,7 @@ import platform
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from neudev.config import NeuDevConfig
 from neudev.llm import OllamaClient, LLMError
@@ -104,10 +105,10 @@ class OrchestrationContext:
 class Agent:
     """ReAct-style agent that reasons and acts using tools."""
 
-    def __init__(self, config: NeuDevConfig, workspace: str):
+    def __init__(self, config: NeuDevConfig, workspace: str, llm_client: Any | None = None):
         self.config = config
         self.workspace = str(Path(workspace).resolve())
-        self.llm = OllamaClient(config)
+        self.llm = llm_client if llm_client is not None else OllamaClient(config)
         self.tool_registry = create_tool_registry()
         self.tool_registry.bind_workspace(self.workspace)
         self.context = WorkspaceContext(self.workspace)
