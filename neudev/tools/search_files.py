@@ -38,7 +38,7 @@ class SearchFilesTool(BaseTool):
             "properties": {
                 "directory": {
                     "type": "string",
-                    "description": "Directory to search within.",
+                    "description": "Directory to search within. Defaults to the workspace root.",
                 },
                 "pattern": {
                     "type": "string",
@@ -54,18 +54,18 @@ class SearchFilesTool(BaseTool):
                     "description": "Filter by type. Default 'file'.",
                 },
             },
-            "required": ["directory", "pattern"],
+            "required": ["pattern"],
         }
 
     def execute(
         self,
-        directory: str,
         pattern: str,
+        directory: str = ".",
         max_depth: int = 10,
         file_type: str = "file",
         **kwargs,
     ) -> str:
-        dirpath = Path(directory).resolve()
+        dirpath = self.resolve_directory(directory, must_exist=True)
 
         if not dirpath.exists():
             raise ToolError(f"Directory not found: {dirpath}")

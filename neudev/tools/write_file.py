@@ -1,8 +1,5 @@
 """Write file tool for NeuDev."""
 
-import os
-from pathlib import Path
-
 from neudev.tools.base import BaseTool, ToolError
 
 
@@ -49,7 +46,10 @@ class WriteFileTool(BaseTool):
     def permission_message(self, args: dict) -> str:
         path = args.get("path", "unknown")
         overwrite = args.get("overwrite", False)
-        exists = Path(path).exists()
+        try:
+            exists = self.resolve_path(path).exists()
+        except ToolError:
+            exists = False
         if exists and overwrite:
             return f"Overwrite existing file: {path}"
         elif exists:
@@ -58,7 +58,7 @@ class WriteFileTool(BaseTool):
             return f"Create new file: {path}"
 
     def execute(self, path: str, content: str, overwrite: bool = False, **kwargs) -> str:
-        filepath = Path(path).resolve()
+        filepath = self.resolve_path(path)
 
         existed = filepath.exists()
 

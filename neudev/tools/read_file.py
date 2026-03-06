@@ -1,8 +1,5 @@
 """Read file tool for NeuDev."""
 
-import os
-from pathlib import Path
-
 from neudev.tools.base import BaseTool, ToolError
 
 
@@ -43,7 +40,7 @@ class ReadFileTool(BaseTool):
         }
 
     def execute(self, path: str, start_line: int = None, end_line: int = None, **kwargs) -> str:
-        filepath = Path(path).resolve()
+        filepath = self.resolve_path(path, must_exist=True)
 
         if not filepath.exists():
             raise ToolError(f"File not found: {filepath}")

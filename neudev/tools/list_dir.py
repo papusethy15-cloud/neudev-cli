@@ -1,6 +1,5 @@
 """List directory tool for NeuDev."""
 
-import os
 from pathlib import Path
 
 from neudev.tools.base import BaseTool, ToolError
@@ -34,7 +33,7 @@ class ListDirectoryTool(BaseTool):
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the directory to list.",
+                    "description": "Path to the directory to list. Defaults to the workspace root.",
                 },
                 "max_depth": {
                     "type": "integer",
@@ -45,11 +44,10 @@ class ListDirectoryTool(BaseTool):
                     "description": "Show hidden files (starting with '.'). Default false.",
                 },
             },
-            "required": ["path"],
         }
 
-    def execute(self, path: str, max_depth: int = 3, show_hidden: bool = False, **kwargs) -> str:
-        dirpath = Path(path).resolve()
+    def execute(self, path: str = ".", max_depth: int = 3, show_hidden: bool = False, **kwargs) -> str:
+        dirpath = self.resolve_directory(path, must_exist=True)
 
         if not dirpath.exists():
             raise ToolError(f"Directory not found: {dirpath}")

@@ -1,7 +1,5 @@
 """Edit file tool for NeuDev."""
 
-from pathlib import Path
-
 from neudev.tools.base import BaseTool, ToolError
 
 
@@ -64,7 +62,7 @@ class EditFileTool(BaseTool):
         replace_all: bool = False,
         **kwargs,
     ) -> str:
-        filepath = Path(path).resolve()
+        filepath = self.resolve_path(path, must_exist=True)
 
         if not filepath.exists():
             raise ToolError(f"File not found: {filepath}")

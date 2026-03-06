@@ -49,7 +49,7 @@ class GrepSearchTool(BaseTool):
                 },
                 "directory": {
                     "type": "string",
-                    "description": "Directory to search within.",
+                    "description": "Directory to search within. Defaults to the workspace root.",
                 },
                 "is_regex": {
                     "type": "boolean",
@@ -64,19 +64,19 @@ class GrepSearchTool(BaseTool):
                     "description": "Glob pattern for files to include (e.g., '*.py').",
                 },
             },
-            "required": ["query", "directory"],
+            "required": ["query"],
         }
 
     def execute(
         self,
         query: str,
-        directory: str,
+        directory: str = ".",
         is_regex: bool = False,
         case_insensitive: bool = False,
         includes: str = None,
         **kwargs,
     ) -> str:
-        dirpath = Path(directory).resolve()
+        dirpath = self.resolve_directory(directory, must_exist=True)
 
         if not dirpath.exists():
             raise ToolError(f"Directory not found: {dirpath}")
@@ -108,7 +108,7 @@ class GrepSearchTool(BaseTool):
                 if includes and not fnmatch.fnmatch(filename, includes):
                     continue
 
-                filepath = Path(root) / filename
+                filepath = self.resolve_path(str(Path(root) / filename), must_exist=True)
                 files_searched += 1
 
                 try:

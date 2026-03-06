@@ -1,9 +1,6 @@
 """Run shell command tool for NeuDev."""
 
 import subprocess
-import shlex
-import sys
-from pathlib import Path
 
 from neudev.tools.base import BaseTool, ToolError
 
@@ -67,7 +64,7 @@ class RunCommandTool(BaseTool):
             if blocked in cmd_lower:
                 raise ToolError(f"Blocked dangerous command: {command}")
 
-        work_dir = Path(cwd).resolve() if cwd else Path.cwd()
+        work_dir = self.resolve_directory(cwd, must_exist=True)
         if not work_dir.exists():
             raise ToolError(f"Working directory not found: {work_dir}")
 

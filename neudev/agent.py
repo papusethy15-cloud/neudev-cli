@@ -1,12 +1,11 @@
 """Agent reasoning loop for NeuDev - the brain of the system."""
 
-import json
+import platform
 from pathlib import Path
-from typing import Optional
 
 from neudev.config import NeuDevConfig
-from neudev.llm import OllamaClient, LLMError, ToolsNotSupportedError
-from neudev.tools import ToolRegistry, create_tool_registry
+from neudev.llm import OllamaClient, LLMError
+from neudev.tools import create_tool_registry
 from neudev.tools.base import ToolError
 from neudev.context import WorkspaceContext
 from neudev.session import SessionManager
@@ -43,15 +42,26 @@ You have access to powerful tools for file system operations:
 - When creating test files, mention they are test files
 - Suggest improvements after creating or modifying code
 - Be precise with file paths - use the workspace directory as the base
+- Prefer workspace-relative paths like `README.md` or `neudev/agent.py`
+- Do not invent absolute paths when a relative path will work
 - When editing files, provide the EXACT text to find and replace
+
+## Tool Calling
+- Use native tool calling when the model supports it
+- If native tool calling is unavailable, output ONLY tool call blocks in this format:
+  <tool_call>
+  <function=read_file>
+  <parameter=path>README.md</parameter>
+  </tool_call>
+- After a tool result arrives, continue the analysis and request the next tool if needed
 
 ## Workspace Context
 {workspace_context}
 
 ## Important
-- You are running on Windows
+- Platform: {platform_name}
 - The workspace directory is: {workspace_path}
-- Use forward slashes or escaped backslashes in paths
+- Use forward slashes in paths when possible
 - Be helpful, precise, and professional
 """
 
@@ -64,6 +74,7 @@ class Agent:
         self.workspace = str(Path(workspace).resolve())
         self.llm = OllamaClient(config)
         self.tool_registry = create_tool_registry()
+        self.tool_registry.bind_workspace(self.workspace)
         self.context = WorkspaceContext(self.workspace)
         self.session = SessionManager(self.workspace)
         self.permissions = PermissionManager()
@@ -76,6 +87,7 @@ class Agent:
         system_content = SYSTEM_PROMPT.format(
             workspace_context=workspace_context,
             workspace_path=self.workspace,
+            platform_name=platform.system(),
         )
         self.conversation = [{"role": "system", "content": system_content}]
 
@@ -101,6 +113,7 @@ class Agent:
         tool_defs = self.tool_registry.get_tool_definitions()
         final_response = ""
         use_thinking = self.config.show_thinking
+        warned_about_tool_fallback = False
 
         for iteration in range(self.config.max_iterations):
             try:
@@ -109,34 +122,22 @@ class Agent:
                     tools=tool_defs,
                     think=use_thinking,
                 )
-            except ToolsNotSupportedError:
-                # Model doesn't support tools — retry without them
-                try:
-                    result = self.llm.chat_with_tools(
-                        messages=self.conversation,
-                        tools=None,
-                        think=use_thinking,
-                    )
-                    # Append a warning note so the user knows
-                    warning = (
-                        "\n\n⚠️ **Note:** This model does not support tool calling. "
-                        "File and command tools are unavailable. "
-                        "Use `/models` to switch to a tool-capable model."
-                    )
-                    if result["content"]:
-                        result["content"] += warning
-                    else:
-                        result["content"] = warning
-                    result["done"] = True
-                    result["tool_calls"] = []
-                except LLMError as e2:
-                    error_msg = f"LLM Error: {e2}"
-                    self.conversation.append({"role": "assistant", "content": error_msg})
-                    return error_msg
             except LLMError as e:
                 error_msg = f"LLM Error: {e}"
                 self.conversation.append({"role": "assistant", "content": error_msg})
                 return error_msg
+
+            if (
+                not result.get("native_tools_supported", True)
+                and not result["tool_calls"]
+                and not warned_about_tool_fallback
+            ):
+                warning = (
+                    "\n\n⚠️ **Note:** This model did not use tools in this reply. "
+                    "Switch to a stronger tool-calling model with `/models` if analysis stalls."
+                )
+                result["content"] = (result["content"] or "") + warning
+                warned_about_tool_fallback = True
 
             # If there's thinking content, send it to the callback
             if result.get("thinking") and on_thinking:
@@ -157,9 +158,12 @@ class Agent:
             # Process tool calls
             # Add assistant message with tool calls to conversation
             assistant_msg = {"role": "assistant", "content": result["content"] or ""}
+            if result.get("thinking"):
+                assistant_msg["thinking"] = result["thinking"]
             if result["tool_calls"]:
                 assistant_msg["tool_calls"] = [
                     {
+                        "type": "function",
                         "function": {
                             "name": tc["name"],
                             "arguments": tc["arguments"],
@@ -182,6 +186,7 @@ class Agent:
                 # Add tool result to conversation
                 self.conversation.append({
                     "role": "tool",
+                    "tool_name": tool_name,
                     "content": tool_result,
                 })
 
@@ -203,6 +208,14 @@ class Agent:
         if tool is None:
             return f"Error: Unknown tool '{name}'"
 
+        resolved_path = None
+        raw_path = args.get("path")
+        if raw_path:
+            try:
+                resolved_path = str(tool.resolve_path(raw_path))
+            except ToolError:
+                resolved_path = None
+
         # Permission check for destructive tools
         if tool.requires_permission:
             message = tool.permission_message(args)
@@ -211,9 +224,10 @@ class Agent:
 
         # Backup file before modification
         if name in ("write_file", "edit_file", "delete_file"):
-            path = args.get("path", "")
-            if path:
-                self.session.backup_file(path)
+            if resolved_path:
+                self.session.backup_file(resolved_path)
+            elif raw_path:
+                self.session.backup_file(raw_path)
 
         # Execute
         try:
@@ -232,16 +246,17 @@ class Agent:
             "run_command": "command",
         }
         action_type = action_map.get(name, "other")
-        target = args.get("path", args.get("command", args.get("directory", name)))
+        target = resolved_path or args.get("command") or args.get("directory") or name
         self.session.record_action(action_type, str(target))
 
         # Track file access
-        if "path" in args:
-            self.context.track_file_access(args["path"])
+        if resolved_path:
+            self.context.track_file_access(resolved_path)
 
         # Track test files
-        if name == "write_file" and ("test_" in str(args.get("path", "")) or "_test." in str(args.get("path", ""))):
-            self.session.track_test_file(args["path"])
+        if name == "write_file" and resolved_path:
+            if "test_" in resolved_path or "_test." in resolved_path:
+                self.session.track_test_file(resolved_path)
 
         return result
 

@@ -96,7 +96,10 @@ class WorkspaceContext:
 
     def track_file_access(self, path: str) -> None:
         """Track a file access for context."""
-        abs_path = str(Path(path).resolve())
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.workspace / candidate
+        abs_path = str(candidate.resolve())
         if abs_path in self.recent_files:
             self.recent_files.remove(abs_path)
         self.recent_files.insert(0, abs_path)

@@ -1,7 +1,5 @@
 """Delete file tool for NeuDev."""
 
-from pathlib import Path
-
 from neudev.tools.base import BaseTool, ToolError
 
 
@@ -40,7 +38,7 @@ class DeleteFileTool(BaseTool):
         return f"Delete file: {args.get('path', 'unknown')}"
 
     def execute(self, path: str, **kwargs) -> str:
-        filepath = Path(path).resolve()
+        filepath = self.resolve_path(path, must_exist=True)
 
         if not filepath.exists():
             raise ToolError(f"File not found: {filepath}")

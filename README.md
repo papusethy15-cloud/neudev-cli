@@ -11,6 +11,9 @@ NeuDev is a professional AI coding agent powered by **Ollama** and **Qwen 3.5**,
 - **Session Tracking** — Full action history, file backups, undo support, session summary on exit
 - **Model Switching** — Switch between any downloaded Ollama models with `/models`
 - **Workspace Awareness** — Auto-detects project type, key files, and structure
+- **Workspace-Safe Tools** — Relative paths resolve from the active workspace and stay inside it
+- **Tool Fallback Parsing** — Converts text-based `<tool_call>` blocks into real tool executions for weaker models
+- **Cross-Platform Prompts** — Adapts path guidance to Windows or Linux environments like Lightning Studio
 
 ## 📦 Installation
 

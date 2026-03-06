@@ -8,6 +8,7 @@ import urllib.error
 from typing import Generator, Optional
 
 from neudev.config import NeuDevConfig
+from neudev.tool_call_parser import extract_text_tool_calls
 
 
 class LLMError(Exception):
@@ -257,10 +258,12 @@ class OllamaClient:
             - tool_calls: list[dict] (tool calls if any)
             - done: bool (whether agent is done - no more tool calls)
         """
+        native_tools_supported = True
         try:
             response = self.chat(messages, tools=tools, stream=False, think=think)
         except ToolsNotSupportedError:
             # Retry without tools — model can still chat, just no function calling
+            native_tools_supported = False
             response = self.chat(messages, tools=None, stream=False, think=think)
 
         result = {
@@ -268,6 +271,8 @@ class OllamaClient:
             "thinking": "",
             "tool_calls": [],
             "done": True,
+            "native_tools_supported": native_tools_supported,
+            "tool_call_mode": "native",
         }
 
         message = response.get("message", {})
@@ -284,5 +289,23 @@ class OllamaClient:
                     "name": func.get("name", ""),
                     "arguments": func.get("arguments", {}),
                 })
+        elif tools:
+            tool_names = [tool["function"]["name"] for tool in tools if tool.get("function")]
+            extracted_calls = []
+
+            content_calls, cleaned_content = extract_text_tool_calls(result["content"], tool_names)
+            if content_calls:
+                extracted_calls.extend(content_calls)
+                result["content"] = cleaned_content
+
+            thinking_calls, cleaned_thinking = extract_text_tool_calls(result["thinking"], tool_names)
+            if thinking_calls:
+                extracted_calls.extend(thinking_calls)
+                result["thinking"] = cleaned_thinking
+
+            if extracted_calls:
+                result["tool_calls"] = extracted_calls
+                result["done"] = False
+                result["tool_call_mode"] = "text"
 
         return result

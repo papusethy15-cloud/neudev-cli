@@ -36,7 +36,7 @@ class SessionManager:
     """Tracks all actions in a session for summaries and undo."""
 
     def __init__(self, workspace: str):
-        self.workspace = workspace
+        self.workspace = str(Path(workspace).resolve())
         self.start_time = time.time()
         self.actions: list[ActionRecord] = []
         self.file_backups: list[FileBackup] = []
@@ -49,18 +49,18 @@ class SessionManager:
 
     def backup_file(self, path: str) -> None:
         """Backup a file's content before modification."""
-        filepath = Path(path)
+        filepath = self._resolve_path(path)
         content = None
         if filepath.exists():
             try:
                 content = filepath.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 content = None
-        self.file_backups.append(FileBackup(path=str(filepath.resolve()), original_content=content))
+        self.file_backups.append(FileBackup(path=str(filepath), original_content=content))
 
     def track_test_file(self, path: str) -> None:
         """Track a test file for cleanup."""
-        self.test_files.append(str(Path(path).resolve()))
+        self.test_files.append(str(self._resolve_path(path)))
 
     def undo_last_change(self) -> Optional[str]:
         """Undo the last file change. Returns description of what was undone."""
@@ -167,3 +167,10 @@ class SessionManager:
                 suggestions.append("Consider adding a .gitignore file.")
 
         return suggestions
+
+    def _resolve_path(self, path: str) -> Path:
+        """Resolve a session path relative to the workspace."""
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(self.workspace) / candidate
+        return candidate.resolve()
