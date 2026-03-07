@@ -5,8 +5,9 @@ import unittest
 from argparse import Namespace
 from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
+import neudev.cli as cli_module
 from rich.panel import Panel
 
 from neudev.cli import (
@@ -26,6 +27,7 @@ from neudev.cli import (
     run_login_setup,
     run_logout,
     run_uninstall,
+    should_use_live_trace_panel,
 )
 from neudev.config import NeuDevConfig
 from neudev.permissions import PermissionManager
@@ -118,6 +120,22 @@ class CLITests(unittest.TestCase):
         self.assertIn("qwen2.5-coder:7b", status)
         self.assertIn("1/2 completed", status)
         self.assertIn("Waiting for the model", status)
+
+    def test_should_use_live_trace_panel_requires_main_thread_terminal(self):
+        with patch.object(type(cli_module.console), "is_terminal", new_callable=PropertyMock, return_value=True), patch(
+            "neudev.cli.threading.current_thread", return_value=threading.main_thread()
+        ):
+            self.assertTrue(should_use_live_trace_panel())
+
+        with patch.object(type(cli_module.console), "is_terminal", new_callable=PropertyMock, return_value=True), patch(
+            "neudev.cli.threading.current_thread", return_value=object()
+        ):
+            self.assertFalse(should_use_live_trace_panel())
+
+        with patch.object(type(cli_module.console), "is_terminal", new_callable=PropertyMock, return_value=False), patch(
+            "neudev.cli.threading.current_thread", return_value=threading.main_thread()
+        ):
+            self.assertFalse(should_use_live_trace_panel())
 
     def test_logout_clears_saved_api_key_only(self):
         with tempfile.TemporaryDirectory() as tempdir:

@@ -498,6 +498,11 @@ def build_live_status_panel(trace: ExecutionTraceState) -> Panel:
     )
 
 
+def should_use_live_trace_panel() -> bool:
+    """Use Rich Live only when this process safely owns the active terminal."""
+    return bool(console.is_terminal and threading.current_thread() is threading.main_thread())
+
+
 def _run_live_trace_panel(trace: ExecutionTraceState, runner) -> None:
     """Refresh the transient live status panel while a turn is active."""
     stop_event = threading.Event()
@@ -1752,7 +1757,10 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
         )
 
     try:
-        _run_live_trace_panel(trace, run_turn)
+        if should_use_live_trace_panel():
+            _run_live_trace_panel(trace, run_turn)
+        else:
+            run_turn()
     except LLMError as exc:
         console.print(
             Panel(
@@ -2377,7 +2385,10 @@ def process_remote_user_input(
         )
 
     try:
-        _run_live_trace_panel(trace, run_turn)
+        if should_use_live_trace_panel():
+            _run_live_trace_panel(trace, run_turn)
+        else:
+            run_turn()
     except RemoteAPIError as exc:
         console.print(
             Panel(
