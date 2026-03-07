@@ -16,6 +16,7 @@ from neudev.cli import (
     QueuedLocalTaskRunner,
     build_trace_summary_lines,
     build_live_status_lines,
+    build_plan_panel_content,
     build_parser,
     handle_local_queue_command,
     handle_local_permission_input,
@@ -120,6 +121,63 @@ class CLITests(unittest.TestCase):
         self.assertIn("qwen2.5-coder:7b", status)
         self.assertIn("1/2 completed", status)
         self.assertIn("Waiting for the model", status)
+
+    def test_build_plan_panel_content_renders_full_plan_only_once(self):
+        trace = ExecutionTraceState()
+        plan_update = {
+            "plan": [
+                {"text": "Create index.html", "status": "in_progress"},
+                {"text": "Add style.css", "status": "pending"},
+                {"text": "Implement script.js", "status": "pending"},
+            ],
+            "conventions": [
+                "Use semantic HTML5",
+                "Mobile-first responsive CSS",
+            ],
+        }
+
+        first = build_plan_panel_content(plan_update, trace=trace)
+        second = build_plan_panel_content(plan_update, trace=trace)
+
+        self.assertIsNotNone(first)
+        title, lines = first
+        body = "\n".join(lines)
+        self.assertIn("Plan Update", title)
+        self.assertIn("Execution Plan", body)
+        self.assertIn("Repository Conventions", body)
+        self.assertIsNone(second)
+
+    def test_build_plan_panel_content_switches_to_compact_progress_updates(self):
+        trace = ExecutionTraceState()
+        initial = {
+            "plan": [
+                {"text": "Create index.html", "status": "in_progress"},
+                {"text": "Add style.css", "status": "pending"},
+                {"text": "Implement script.js", "status": "pending"},
+            ],
+            "conventions": ["Use semantic HTML5"],
+        }
+        progress = {
+            "plan": [
+                {"text": "Create index.html", "status": "completed"},
+                {"text": "Add style.css", "status": "in_progress"},
+                {"text": "Implement script.js", "status": "pending"},
+            ],
+            "conventions": ["Use semantic HTML5"],
+        }
+
+        build_plan_panel_content(initial, trace=trace)
+        updated = build_plan_panel_content(progress, trace=trace)
+
+        self.assertIsNotNone(updated)
+        title, lines = updated
+        body = "\n".join(lines)
+        self.assertIn("Plan Progress", title)
+        self.assertIn("Completed", body)
+        self.assertIn("Create index.html", body)
+        self.assertIn("In Progress", body)
+        self.assertIn("Add style.css", body)
+        self.assertNotIn("Repository Conventions", body)
 
     def test_should_use_live_trace_panel_requires_main_thread_terminal(self):
         with patch.object(type(cli_module.console), "is_terminal", new_callable=PropertyMock, return_value=True), patch(

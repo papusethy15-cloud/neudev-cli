@@ -6,10 +6,12 @@ from unittest.mock import patch
 
 from neudev.agent import Agent
 from neudev.config import NeuDevConfig
+from neudev.tools.base import ToolError
 from neudev.tools.grep_search import GrepSearchTool
 from neudev.tools.read_files_batch import ReadFilesBatchTool
 from neudev.tools.run_command import RunCommandTool
 from neudev.tools.search_files import SearchFilesTool
+from neudev.tools.smart_edit_file import SmartEditFileTool
 
 
 FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "workspace_basic"
@@ -62,6 +64,26 @@ class ToolSmartnessTests(unittest.TestCase):
         self.assertIn("Automatic fallback", result)
         self.assertIn("smart_edit_file", result)
         self.assertIn("great", self.example_path.read_text(encoding="utf-8"))
+
+    def test_smart_edit_file_accepts_common_alias_argument_names(self):
+        tool = SmartEditFileTool()
+        tool.bind_workspace(FIXTURE_ROOT)
+
+        result = tool.execute(
+            path="src/example.py",
+            old_text='return "ok"',
+            new_text='return "better"',
+        )
+
+        self.assertIn("Edited", result)
+        self.assertIn("better", self.example_path.read_text(encoding="utf-8"))
+
+    def test_smart_edit_file_reports_missing_text_as_tool_error(self):
+        tool = SmartEditFileTool()
+        tool.bind_workspace(FIXTURE_ROOT)
+
+        with self.assertRaisesRegex(ToolError, "smart_edit_file requires a replace target"):
+            tool.execute(path="src/example.py")
 
     @patch("neudev.agent.OllamaClient", DummyOllamaClient)
     def test_agent_passes_stop_event_into_run_command(self):

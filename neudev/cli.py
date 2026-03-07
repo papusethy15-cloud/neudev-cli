@@ -266,6 +266,10 @@ class ExecutionTraceState:
     latest_thinking: str = ""
     latest_response: str = ""
     waiting_for_model: bool = False
+    plan_panel_rendered: bool = False
+    last_plan_signature: tuple = field(default_factory=tuple)
+    last_plan_active_item: str = ""
+    last_plan_completed: int = 0
 
     def elapsed_seconds(self) -> float:
         """Return the turn duration."""
@@ -817,13 +821,65 @@ def handle_help() -> None:
     console.print()
 
 
-def render_plan_panel(plan_update: dict | None, *, trace: ExecutionTraceState | None = None) -> None:
-    """Render remote or local plan progress."""
+def build_plan_panel_content(
+    plan_update: dict | None,
+    *,
+    trace: ExecutionTraceState | None = None,
+) -> tuple[str, list[str]] | None:
+    """Build either the initial execution plan or a compact progress update."""
     if not plan_update:
-        return
-    _record_trace_plan(trace, plan_update)
+        return None
     plan_items = plan_update.get("plan") or []
     conventions = plan_update.get("conventions") or []
+    completed = sum(1 for item in plan_items if item.get("status") == "completed")
+    active_item = next((item.get("text", "") for item in plan_items if item.get("status") == "in_progress"), "")
+    signature = (
+        tuple((item.get("text", ""), item.get("status", "pending")) for item in plan_items),
+        tuple(str(item) for item in conventions),
+    )
+
+    previous_statuses: dict[str, str] = {}
+    previous_completed = 0
+    previous_active_item = ""
+    initial_render = True
+    if trace is not None:
+        with trace.lock:
+            previous_completed = trace.last_plan_completed
+            previous_active_item = trace.last_plan_active_item
+            if trace.last_plan_signature == signature:
+                return None
+            previous_statuses = {
+                text: status for text, status in trace.last_plan_signature[0]
+            } if trace.last_plan_signature else {}
+            initial_render = not trace.plan_panel_rendered
+            trace.plan_total = len(plan_items)
+            trace.plan_completed = completed
+            trace.active_plan_item = str(active_item or "").strip()
+            trace.plan_panel_rendered = True
+            trace.last_plan_signature = signature
+            trace.last_plan_active_item = str(active_item or "").strip()
+            trace.last_plan_completed = completed
+
+    if not plan_items and not conventions:
+        return None
+
+    if not initial_render:
+        lines = []
+        newly_completed = [
+            item.get("text", "")
+            for item in plan_items
+            if item.get("status") == "completed" and previous_statuses.get(item.get("text", "")) != "completed"
+        ]
+        for item in newly_completed[:2]:
+            lines.append(f"[success]Completed[/success] {item}")
+        if active_item and active_item != previous_active_item:
+            lines.append(f"[info]In Progress[/info] {active_item}")
+        remaining = max(len(plan_items) - completed, 0)
+        lines.append(f"[dim]Progress[/dim] {completed}/{len(plan_items)} completed | {remaining} remaining")
+        if not lines:
+            return None
+        return "[bold bright_yellow]Plan Progress[/bold bright_yellow]", lines
+
     lines = []
     if plan_items:
         lines.append("[bold bright_yellow]Execution Plan[/bold bright_yellow]")
@@ -845,12 +901,21 @@ def render_plan_panel(plan_update: dict | None, *, trace: ExecutionTraceState | 
         if len(conventions) > 2:
             lines.append(f"[dim]... {len(conventions) - 2} more conventions[/dim]")
     if not lines:
+        return None
+    return "[bold bright_yellow]Plan Update[/bold bright_yellow]", lines
+
+
+def render_plan_panel(plan_update: dict | None, *, trace: ExecutionTraceState | None = None) -> None:
+    """Render remote or local plan progress."""
+    built = build_plan_panel_content(plan_update, trace=trace)
+    if not built:
         return
+    title, lines = built
     console.print(
         Panel(
             "\n".join(lines),
             border_style="bright_yellow",
-            title="[bold bright_yellow]Plan Update[/bold bright_yellow]",
+            title=title,
             padding=(0, 1),
             expand=False,
             width=min(console.width, 72),

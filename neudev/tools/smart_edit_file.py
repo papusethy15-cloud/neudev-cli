@@ -37,12 +37,28 @@ class SmartEditFileTool(BaseTool):
                     "type": "string",
                     "description": "The new text to insert.",
                 },
+                "find_text": {
+                    "type": "string",
+                    "description": "Alias for target_content.",
+                },
+                "replace_text": {
+                    "type": "string",
+                    "description": "Alias for replacement_content.",
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": "Alias for target_content.",
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "Alias for replacement_content.",
+                },
                 "replace_all": {
                     "type": "boolean",
                     "description": "Replace every matching block. Default false.",
                 },
             },
-            "required": ["path", "target_content", "replacement_content"],
+            "required": ["path"],
         }
 
     @property
@@ -51,18 +67,39 @@ class SmartEditFileTool(BaseTool):
 
     def permission_message(self, args: dict) -> str:
         path = args.get("path", "unknown")
-        target = args.get("target_content", "")
+        target = self._pick_alias(
+            args.get("target_content"),
+            args.get("find_text"),
+            args.get("old_text"),
+        ) or ""
         preview = target[:80] + "..." if len(target) > 80 else target
         return f"Smart edit file: {path}\n  Replace: {preview}"
 
     def execute(
         self,
         path: str,
-        target_content: str,
-        replacement_content: str,
+        target_content: str | None = None,
+        replacement_content: str | None = None,
         replace_all: bool = False,
         **kwargs,
     ) -> str:
+        target_content = self._pick_alias(
+            target_content,
+            kwargs.get("find_text"),
+            kwargs.get("old_text"),
+        )
+        replacement_content = self._pick_alias(
+            replacement_content,
+            kwargs.get("replace_text"),
+            kwargs.get("new_text"),
+        )
+        if target_content is None or replacement_content is None:
+            raise ToolError(
+                "smart_edit_file requires a replace target and replacement text. "
+                "Use `target_content`/`replacement_content` or the aliases "
+                "`find_text`/`replace_text` or `old_text`/`new_text`."
+            )
+
         filepath = self.resolve_path(path, must_exist=True)
 
         if not filepath.exists():
@@ -185,3 +222,10 @@ class SmartEditFileTool(BaseTool):
     @staticmethod
     def _normalize_line(line: str) -> str:
         return " ".join(line.strip().split())
+
+    @staticmethod
+    def _pick_alias(*values: str | None) -> str | None:
+        for value in values:
+            if value is not None:
+                return value
+        return None
