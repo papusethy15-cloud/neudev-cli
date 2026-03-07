@@ -464,7 +464,7 @@ def handle_help() -> None:
     table.add_row("/thinking", "Toggle local thinking display")
     table.add_row("/approve", "Approve a pending tool permission")
     table.add_row("/deny", "Deny a pending tool permission")
-    table.add_row("/queue", "Show active and pending tasks")
+    table.add_row("/queue", "Show queue, add follow-ups, or clear pending tasks")
     table.add_row("/stop", "Request cancellation for the active task or hosted turn")
     table.add_row("/version", "Show version info")
     table.add_row("/close", "Close the current remote session")
@@ -1353,7 +1353,10 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
             ("Command Policy", command_policy_display),
         ],
     )
-    console.print("  [dim]Live plan, tool, and verification events appear below. Use /stop to request cancellation.[/dim]")
+    console.print(
+        "  [dim]Live plan, tool, and verification events appear below. "
+        "Use /stop to request cancellation. While work is active, use `/queue add <message>` for intentional follow-ups.[/dim]"
+    )
     console.print()
     thinking_parts: list[str] = []
     response = ""
@@ -1494,6 +1497,14 @@ class QueuedLocalTaskRunner:
         """Return the number of queued tasks that have not started yet."""
         with self._condition:
             return len(self._pending)
+
+    def clear_pending(self) -> int:
+        """Drop queued follow-up tasks that have not started yet."""
+        with self._condition:
+            cleared = len(self._pending)
+            self._pending.clear()
+            self._condition.notify_all()
+            return cleared
 
     def snapshot(self) -> tuple[str | None, list[str]]:
         """Return the active task and queued follow-up tasks."""
@@ -1702,8 +1713,70 @@ def handle_remote_permission_input(
 def _render_busy_command_warning(command: str) -> None:
     """Explain why a slash command is blocked while work is in progress."""
     console.print(
-        f"\n  [warning]⚠️  {command} is locked while a task is running. Use /queue, /stop, or wait for completion.[/warning]\n"
+        f"\n  [warning]⚠️  {command} is locked while a task is running. Use `/queue`, `/queue add <message>`, `/queue clear`, `/stop`, or wait for completion.[/warning]\n"
     )
+
+
+def _render_busy_text_warning(user_input: str, *, hosted: bool = False) -> None:
+    """Warn when plain text arrives while work is already running."""
+    scope = "hosted turn" if hosted else "task"
+    preview = _truncate_cli_value(user_input, limit=72)
+    console.print(
+        "\n"
+        f"  [warning]⚠️  Ignored plain-text input while a {scope} is running: `{preview}`.\n"
+        "  Use `/queue add <message>` to queue an intentional follow-up, `/queue clear` to drop pending work, or `/stop` to cancel.[/warning]\n"
+    )
+
+
+def _handle_queue_command(runner, arg: str, *, hosted: bool, render_queue) -> None:
+    """Handle `/queue`, `/queue add`, and `/queue clear`."""
+    action = (arg or "").strip()
+    label = "hosted task" if hosted else "task"
+    title_label = "Hosted turn" if hosted else "Task"
+    if not action:
+        render_queue(runner)
+        return
+
+    parts = action.split(maxsplit=1)
+    subcommand = parts[0].lower()
+    remainder = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcommand == "add":
+        if not remainder:
+            console.print(
+                "\n  [warning]⚠️  Missing message. Use `/queue add <message>` to queue an explicit follow-up.[/warning]\n"
+            )
+            return
+        position = runner.submit(remainder)
+        if position:
+            console.print(
+                f"\n  [success]🕒 Queued {label} #{position}: {_summarize_queue_item(remainder)}[/success]\n"
+            )
+        else:
+            console.print(f"\n  [success]▶ {title_label} submitted immediately from `/queue add`.[/success]\n")
+        return
+
+    if subcommand == "clear":
+        cleared = runner.clear_pending()
+        if cleared:
+            console.print(f"\n  [success]🧹 Cleared {cleared} pending {label}(s).[/success]\n")
+        else:
+            console.print(f"\n  [dim]📭 No pending {label}s to clear.[/dim]\n")
+        return
+
+    console.print(
+        "\n  [warning]⚠️  Unknown `/queue` action. Use `/queue`, `/queue add <message>`, or `/queue clear`.[/warning]\n"
+    )
+
+
+def handle_local_queue_command(runner: "QueuedLocalTaskRunner", arg: str) -> None:
+    """Handle queue inspection and management for local or hybrid runs."""
+    _handle_queue_command(runner, arg, hosted=False, render_queue=render_local_queue)
+
+
+def handle_remote_queue_command(runner: "QueuedRemoteTaskRunner", arg: str) -> None:
+    """Handle queue inspection and management for hosted runs."""
+    _handle_queue_command(runner, arg, hosted=True, render_queue=render_remote_queue)
 
 
 def run_local_agent_loop(agent: Agent, config: NeuDevConfig, *, runtime_mode: str) -> None:
@@ -1745,7 +1818,7 @@ def run_local_agent_loop(agent: Agent, config: NeuDevConfig, *, runtime_mode: st
             if cmd == "/help":
                 handle_help()
             elif cmd == "/queue":
-                render_local_queue(runner)
+                handle_local_queue_command(runner, arg)
             elif cmd == "/stop":
                 handle_local_stop(runner, permission_manager)
             elif cmd == "/version":
@@ -1757,6 +1830,8 @@ def run_local_agent_loop(agent: Agent, config: NeuDevConfig, *, runtime_mode: st
                 console.print("\n  [dim]📭 No pending permission request.[/dim]\n")
             elif has_active_work and user_input.startswith("/") and cmd not in safe_busy_commands:
                 _render_busy_command_warning(cmd)
+            elif has_active_work:
+                _render_busy_text_warning(user_input)
             elif cmd == "/models":
                 if runtime_mode == "hybrid":
                     handle_hybrid_models(agent, config, arg or None)
@@ -1893,7 +1968,10 @@ def process_remote_user_input(
             ("Hosted Policy", remote_snapshot.get("command_policy", "unknown")),
         ],
     )
-    console.print("  [dim]Hosted plan, tool, and verification events appear below. Use /stop to interrupt the active turn.[/dim]")
+    console.print(
+        "  [dim]Hosted plan, tool, and verification events appear below. "
+        "Use /stop to interrupt the active turn. While work is active, use `/queue add <message>` for intentional follow-ups.[/dim]"
+    )
     console.print()
     try:
         payload = _consume_remote_stream(
@@ -1981,6 +2059,14 @@ class QueuedRemoteTaskRunner:
         """Return the number of queued hosted turns waiting to run."""
         with self._condition:
             return len(self._pending)
+
+    def clear_pending(self) -> int:
+        """Drop queued hosted turns that have not started yet."""
+        with self._condition:
+            cleared = len(self._pending)
+            self._pending.clear()
+            self._condition.notify_all()
+            return cleared
 
     def snapshot(self) -> tuple[str | None, list[str]]:
         """Return the active hosted turn and queued follow-up turns."""
@@ -2327,7 +2413,7 @@ def run_remote_cli(config: NeuDevConfig, workspace: str | None = None, session_i
             if cmd == "/help":
                 handle_help()
             elif cmd == "/queue":
-                render_remote_queue(runner)
+                handle_remote_queue_command(runner, arg)
             elif cmd == "/stop":
                 handle_remote_stop(runner)
             elif cmd == "/version":
@@ -2339,6 +2425,8 @@ def run_remote_cli(config: NeuDevConfig, workspace: str | None = None, session_i
                 console.print("\n  [dim]No pending hosted permission request.[/dim]\n")
             elif has_active_work and user_input.startswith("/") and cmd not in safe_busy_commands:
                 _render_busy_command_warning(cmd)
+            elif has_active_work:
+                _render_busy_text_warning(user_input, hosted=True)
             elif cmd == "/models":
                 handle_remote_models(session, config, arg or None)
             elif cmd == "/sessions":

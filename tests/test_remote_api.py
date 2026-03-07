@@ -101,6 +101,15 @@ class RemoteAPITests(unittest.TestCase):
 
         self.assertEqual(cm.exception.status_code, 401)
 
+    def test_remote_api_wraps_socket_abort_as_remote_api_error(self):
+        client = RemoteNeuDevClient("http://127.0.0.1:9999", "secret")
+
+        with patch("urllib.request.urlopen", side_effect=ConnectionAbortedError(10053, "aborted")):
+            with self.assertRaises(RemoteAPIError) as cm:
+                client.list_sessions()
+
+        self.assertEqual(cm.exception.status_code, 503)
+
     def test_remote_session_create_and_send_message(self):
         client = self._client()
         session = RemoteSessionClient.create(client, workspace=".")

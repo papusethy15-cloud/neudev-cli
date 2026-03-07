@@ -256,6 +256,8 @@ class RemoteNeuDevClient:
             raise self._http_error(exc)
         except urllib.error.URLError as exc:
             raise RemoteAPIError(f"Cannot connect to remote NeuDev API: {exc}", status_code=503)
+        except OSError as exc:
+            raise RemoteAPIError(f"Cannot connect to remote NeuDev API: {exc}", status_code=503)
 
         if not payload:
             return {}
@@ -304,6 +306,8 @@ class RemoteNeuDevClient:
         except urllib.error.HTTPError as exc:
             raise self._http_error(exc)
         except urllib.error.URLError as exc:
+            raise RemoteAPIError(f"Cannot connect to remote NeuDev API: {exc}", status_code=503)
+        except OSError as exc:
             raise RemoteAPIError(f"Cannot connect to remote NeuDev API: {exc}", status_code=503)
 
     def _websocket_stream(self, payload: dict[str, Any]) -> Iterator[dict[str, Any]]:
