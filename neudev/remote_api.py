@@ -117,6 +117,9 @@ class RemoteNeuDevClient:
     def close_session(self, session_id: str) -> dict[str, Any]:
         return self._request("POST", f"/v1/sessions/{session_id}/close", {})
 
+    def request_stop(self, session_id: str) -> dict[str, Any]:
+        return self._request("POST", f"/v1/sessions/{session_id}/stop", {})
+
     def send_message(self, session_id: str, message: str) -> dict[str, Any]:
         return self._request("POST", f"/v1/sessions/{session_id}/messages", {"message": message})
 
@@ -453,3 +456,6 @@ class RemoteSessionClient:
 
     def close(self) -> dict[str, Any]:
         return self.client.close_session(self.session_id)
+
+    def request_stop(self) -> dict[str, Any]:
+        return self.client.request_stop(self.session_id)

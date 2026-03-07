@@ -3,14 +3,38 @@ import time
 import tempfile
 import unittest
 from argparse import Namespace
+from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from neudev.cli import QueuedLocalTaskRunner, build_parser, run_login_setup, run_logout, run_uninstall
+from neudev.cli import (
+    InteractivePermissionManager,
+    QueuedLocalTaskRunner,
+    build_parser,
+    handle_local_permission_input,
+    handle_local_stop,
+    resolve_local_command_policy,
+    run_hybrid_cli,
+    run_local_cli,
+    run_login_setup,
+    run_logout,
+    run_uninstall,
+)
 from neudev.config import NeuDevConfig
+from neudev.permissions import PermissionManager
+from neudev.tools.run_command import RunCommandTool
 
 
 class CLITests(unittest.TestCase):
+    @staticmethod
+    def _wait_for_pending_permission(manager: InteractivePermissionManager, timeout: float = 1.0) -> bool:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if manager.pending_request() is not None:
+                return True
+            time.sleep(0.01)
+        return False
+
     def test_login_persists_hosted_settings(self):
         with tempfile.TemporaryDirectory() as tempdir:
             config_dir = Path(tempdir) / ".neudev"
@@ -97,6 +121,29 @@ class CLITests(unittest.TestCase):
         self.assertEqual(uninstall_args.command, "uninstall")
         self.assertTrue(uninstall_args.purge_config)
 
+    def test_parser_accepts_command_policy_flag(self):
+        parser = build_parser()
+
+        args = parser.parse_args(["run", "--command-policy", "disabled"])
+
+        self.assertEqual(args.command_policy, "disabled")
+
+    def test_resolve_local_command_policy_defaults_to_restricted_for_hybrid(self):
+        policy, reason = resolve_local_command_policy(NeuDevConfig(command_policy="auto"), "hybrid", "C:/repo")
+
+        self.assertEqual(policy, "restricted")
+        self.assertEqual(reason, "hybrid default")
+
+    def test_resolve_local_command_policy_defaults_to_restricted_for_lightning_workspace(self):
+        policy, reason = resolve_local_command_policy(
+            NeuDevConfig(command_policy="auto"),
+            "local",
+            "/teamspace/studios/this_studio/neudev-cli",
+        )
+
+        self.assertEqual(policy, "restricted")
+        self.assertEqual(reason, "Lightning workspace default")
+
     def test_local_task_runner_queues_follow_up_messages(self):
         started = threading.Event()
         release = threading.Event()
@@ -148,6 +195,130 @@ class CLITests(unittest.TestCase):
                 self.assertTrue(runner.wait_until_idle(timeout=1))
             finally:
                 runner.shutdown(cancel_pending=True, stop_current=True)
+
+    def test_local_permission_input_approves_pending_request_once(self):
+        manager = InteractivePermissionManager()
+        outcome = {}
+
+        def request_permission():
+            outcome["allowed"] = manager.request_permission("run_command", "Run command: pytest")
+
+        with patch("neudev.cli.console.print"):
+            worker = threading.Thread(target=request_permission, daemon=True)
+            worker.start()
+            self.assertTrue(self._wait_for_pending_permission(manager))
+            self.assertTrue(handle_local_permission_input(manager, "y"))
+            worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(outcome["allowed"])
+        self.assertIsNone(manager.pending_request())
+
+    def test_local_permission_input_supports_slash_approve_all(self):
+        manager = InteractivePermissionManager()
+        outcome = {}
+
+        def request_permission():
+            outcome["allowed"] = manager.request_permission("write_file", "Write README.md")
+
+        with patch("neudev.cli.console.print"):
+            worker = threading.Thread(target=request_permission, daemon=True)
+            worker.start()
+            self.assertTrue(self._wait_for_pending_permission(manager))
+            self.assertTrue(handle_local_permission_input(manager, "/approve all"))
+            worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(outcome["allowed"])
+        self.assertTrue(manager.auto_approve)
+
+    def test_handle_local_stop_denies_pending_permission(self):
+        manager = InteractivePermissionManager()
+        outcome = {}
+
+        class FakeRunner:
+            @staticmethod
+            def request_stop():
+                return True
+
+        def request_permission():
+            outcome["allowed"] = manager.request_permission("delete_file", "Delete app.py")
+
+        with patch("neudev.cli.console.print"):
+            worker = threading.Thread(target=request_permission, daemon=True)
+            worker.start()
+            self.assertTrue(self._wait_for_pending_permission(manager))
+            handle_local_stop(FakeRunner(), manager)
+            worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(outcome["allowed"])
+
+    def test_run_local_cli_installs_interactive_permission_manager(self):
+        fake_agent = MagicMock()
+        fake_agent.permissions = PermissionManager()
+        fake_agent.config = NeuDevConfig(auto_permission=True)
+        fake_agent.workspace = "."
+        fake_agent.llm.get_display_model.return_value = "qwen3:latest"
+        fake_agent.tool_registry.get_all.return_value = [object(), object()]
+        fake_agent.tool_registry.get.return_value = None
+
+        with patch("neudev.cli.Agent", return_value=fake_agent), patch(
+            "neudev.cli.console.status", return_value=nullcontext()
+        ), patch("neudev.cli.print_banner"), patch("neudev.cli.print_status_block"), patch(
+            "neudev.cli.run_local_agent_loop"
+        ), patch("neudev.cli.console.print"):
+            run_local_cli(NeuDevConfig(auto_permission=True), workspace=".")
+
+        self.assertIsInstance(fake_agent.permissions, InteractivePermissionManager)
+        self.assertTrue(fake_agent.permissions.auto_approve)
+
+    def test_run_local_cli_applies_explicit_command_policy_to_run_command(self):
+        config = NeuDevConfig(command_policy="disabled")
+        run_command = RunCommandTool()
+        fake_agent = MagicMock()
+        fake_agent.permissions = PermissionManager()
+        fake_agent.config = config
+        fake_agent.workspace = "."
+        fake_agent.llm.get_display_model.return_value = "qwen3:latest"
+        fake_agent.tool_registry.get_all.return_value = [run_command, object()]
+        fake_agent.tool_registry.get.side_effect = lambda name: run_command if name == "run_command" else None
+
+        with patch("neudev.cli.Agent", return_value=fake_agent), patch(
+            "neudev.cli.console.status", return_value=nullcontext()
+        ), patch("neudev.cli.print_banner"), patch("neudev.cli.print_status_block"), patch(
+            "neudev.cli.run_local_agent_loop"
+        ), patch("neudev.cli.console.print"):
+            run_local_cli(config, workspace=".")
+
+        self.assertEqual(run_command.execution_mode, "disabled")
+
+    def test_run_hybrid_cli_defaults_run_command_to_restricted(self):
+        config = NeuDevConfig(
+            runtime_mode="hybrid",
+            command_policy="auto",
+            api_base_url="https://example.com",
+            api_key="secret",
+        )
+        run_command = RunCommandTool()
+        fake_agent = MagicMock()
+        fake_agent.permissions = PermissionManager()
+        fake_agent.config = config
+        fake_agent.workspace = "C:/repo"
+        fake_agent.llm.get_display_model.return_value = "qwen3:latest"
+        fake_agent.tool_registry.get_all.return_value = [run_command, object()]
+        fake_agent.tool_registry.get.side_effect = lambda name: run_command if name == "run_command" else None
+
+        with patch.object(config, "update", side_effect=lambda **kwargs: config.apply_runtime_updates(persist=False, **kwargs)), patch(
+            "neudev.cli.HostedLLMClient", return_value=MagicMock()
+        ), patch("neudev.cli.Agent", return_value=fake_agent), patch(
+            "neudev.cli.console.status", return_value=nullcontext()
+        ), patch("neudev.cli.print_banner"), patch("neudev.cli.print_status_block"), patch(
+            "neudev.cli.run_local_agent_loop"
+        ), patch("neudev.cli.console.print"):
+            run_hybrid_cli(config, workspace="C:/repo")
+
+        self.assertEqual(run_command.execution_mode, "restricted")
 
 
 if __name__ == "__main__":

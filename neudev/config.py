@@ -11,6 +11,7 @@ HISTORY_FILE = CONFIG_DIR / "history.txt"
 VALID_AGENT_MODES = {"single", "team", "parallel"}
 VALID_RUNTIME_MODES = {"local", "remote", "hybrid"}
 VALID_STREAM_TRANSPORTS = {"auto", "sse", "websocket"}
+VALID_COMMAND_POLICIES = {"auto", "permissive", "restricted", "disabled"}
 
 
 @dataclass
@@ -37,6 +38,7 @@ class NeuDevConfig:
     remote_workspace: str = ""
     websocket_base_url: str = ""
     stream_transport: str = "auto"
+    command_policy: str = "auto"
     hybrid_max_payload_bytes: int = 262144
     hybrid_redact_secrets: bool = True
 
@@ -59,6 +61,10 @@ class NeuDevConfig:
         if stream_transport not in VALID_STREAM_TRANSPORTS:
             stream_transport = "auto"
         self.stream_transport = stream_transport
+        command_policy = (self.command_policy or "auto").strip().lower()
+        if command_policy not in VALID_COMMAND_POLICIES:
+            command_policy = "auto"
+        self.command_policy = command_policy
         try:
             hybrid_max_payload_bytes = int(self.hybrid_max_payload_bytes)
         except (TypeError, ValueError):
@@ -123,6 +129,15 @@ class NeuDevConfig:
                     f"Expected one of: {', '.join(sorted(VALID_STREAM_TRANSPORTS))}"
                 )
             kwargs["stream_transport"] = transport
+
+        if "command_policy" in kwargs:
+            command_policy = str(kwargs["command_policy"]).strip().lower()
+            if command_policy not in VALID_COMMAND_POLICIES:
+                raise ValueError(
+                    f"Invalid command_policy '{kwargs['command_policy']}'. "
+                    f"Expected one of: {', '.join(sorted(VALID_COMMAND_POLICIES))}"
+                )
+            kwargs["command_policy"] = command_policy
 
         for key, value in kwargs.items():
             if hasattr(self, key):

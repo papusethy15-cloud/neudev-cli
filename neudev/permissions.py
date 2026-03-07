@@ -19,6 +19,20 @@ _PERMISSION_PROMPT = (
 )
 
 
+def normalize_permission_choice(choice: str | None) -> str | None:
+    """Return a normalized permission scope for a user-entered choice."""
+    raw = str(choice or "").strip().lower()
+    if raw in {"y", "yes", "once"}:
+        return PERMISSION_CHOICE_ONCE
+    if raw in {"n", "no", "deny"}:
+        return PERMISSION_CHOICE_DENY
+    if raw in {"a", "always", "tool"}:
+        return PERMISSION_CHOICE_TOOL
+    if raw in {"all", "always all"}:
+        return PERMISSION_CHOICE_ALL
+    return None
+
+
 def prompt_permission_choice(tool_name: str, message: str, *, title_prefix: str = "Permission Required") -> str:
     """Prompt for a permission decision and return the selected scope."""
     console.print()
@@ -33,18 +47,12 @@ def prompt_permission_choice(tool_name: str, message: str, *, title_prefix: str 
 
     while True:
         try:
-            choice = console.input(_PERMISSION_PROMPT).strip().lower()
+            choice = normalize_permission_choice(console.input(_PERMISSION_PROMPT))
         except (EOFError, KeyboardInterrupt):
             return PERMISSION_CHOICE_DENY
 
-        if choice in ("y", "yes"):
-            return PERMISSION_CHOICE_ONCE
-        if choice in ("n", "no"):
-            return PERMISSION_CHOICE_DENY
-        if choice in ("a", "always"):
-            return PERMISSION_CHOICE_TOOL
-        if choice in ("all", "always all"):
-            return PERMISSION_CHOICE_ALL
+        if choice is not None:
+            return choice
 
         console.print("  [yellow]Enter `y`, `n`, `a`, or `all`.[/yellow]")
 

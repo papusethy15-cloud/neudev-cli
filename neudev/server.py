@@ -72,6 +72,10 @@ class HostedSession:
     pending_prompt: str | None = None
     pending_approval_id: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
+    control_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    current_message: str | None = None
+    current_stop_event: threading.Event | None = field(default=None, repr=False)
+    stop_requested: bool = False
 
     @property
     def config(self) -> NeuDevConfig:
@@ -292,6 +296,34 @@ class HostedSessionService:
         session = self._get_session(session_id)
         return self._stream_operation(lambda emit: self._execute_message(session, message, emit))
 
+    def request_stop(self, session_id: str) -> dict[str, Any]:
+        session = self._get_session(session_id)
+        with session.control_lock:
+            if session.pending_approval_id and session.current_stop_event is None:
+                return {
+                    "status": "awaiting_approval",
+                    "message": "The hosted turn is waiting for approval. Deny or approve the pending request first.",
+                    "approval_id": session.pending_approval_id,
+                    "tool_name": session.pending_tool_name,
+                }
+            stop_event = session.current_stop_event
+            current_message = session.current_message
+            if stop_event is None:
+                return {"status": "idle", "message": "No active hosted turn."}
+            if session.stop_requested:
+                return {
+                    "status": "already_requested",
+                    "message": "Stop was already requested for the active hosted turn.",
+                    "current_message": current_message,
+                }
+            session.stop_requested = True
+            stop_event.set()
+        return {
+            "status": "stop_requested",
+            "message": "Stop requested for the active hosted turn.",
+            "current_message": current_message,
+        }
+
     def respond_to_approval(
         self,
         session_id: str,
@@ -385,6 +417,7 @@ class HostedSessionService:
         thinking_chunks: list[str] = []
         response_chunks: list[str] = []
         status_events: list[dict[str, Any]] = []
+        stop_event = threading.Event()
 
         def record_workspace_change(changes: dict[str, list[str]]) -> None:
             payload = {key: list(value) for key, value in changes.items()}
@@ -423,64 +456,77 @@ class HostedSessionService:
             if emit:
                 emit("text", {"chunk": text})
 
-        with session.lock:
-            try:
-                response = session.agent.process_message(
-                    message,
-                    on_status=record_status,
-                    on_text=record_text,
-                    on_thinking=record_thinking,
-                    on_phase=record_phase,
-                    on_workspace_change=record_workspace_change,
-                    on_plan_update=record_plan_update,
-                )
-            except RemoteApprovalRequired as exc:
-                approval_id = uuid.uuid4().hex
-                session.pending_user_message = message
-                session.pending_tool_name = exc.tool_name
-                session.pending_prompt = exc.message
-                session.pending_approval_id = approval_id
-                self._save_session(session)
-                payload = {
-                    "status": "approval_required",
-                    "session_id": session.session_id,
-                    "approval_id": approval_id,
-                    "tool_name": exc.tool_name,
-                    "message": exc.message,
-                }
-                if emit:
-                    emit("approval_required", payload)
-                return payload
-            except LLMError as exc:
-                payload = {
-                    "status": "error",
-                    "session_id": session.session_id,
-                    "error": str(exc),
-                }
-                self._save_session(session)
-                if emit:
-                    emit("error", payload)
-                return payload
+        with session.control_lock:
+            session.current_message = message
+            session.current_stop_event = stop_event
+            session.stop_requested = False
 
-            payload = {
-                "status": "ok",
-                "session_id": session.session_id,
-                "response": response,
-                "thinking": "".join(thinking_chunks).strip(),
-                "phases": phases,
-                "workspace_changes": workspace_changes[-1] if workspace_changes else None,
-                "plan_update": plan_updates[-1] if plan_updates else None,
-                "status_events": status_events,
-                "agent_team": self._team_snapshot(session),
-                "review_notes": session.agent.last_review_notes,
-                "display_model": session.agent.llm.get_display_model(),
-                "last_used_model": session.agent.llm.last_used_model,
-                "last_route_reason": session.agent.llm.last_route_reason,
-                "streamed_response": "".join(response_chunks).strip(),
-            }
-            self._save_session(session)
+        try:
+            with session.lock:
+                try:
+                    response = session.agent.process_message(
+                        message,
+                        on_status=record_status,
+                        on_text=record_text,
+                        on_thinking=record_thinking,
+                        on_phase=record_phase,
+                        on_workspace_change=record_workspace_change,
+                        on_plan_update=record_plan_update,
+                        stop_event=stop_event,
+                    )
+                except RemoteApprovalRequired as exc:
+                    approval_id = uuid.uuid4().hex
+                    session.pending_user_message = message
+                    session.pending_tool_name = exc.tool_name
+                    session.pending_prompt = exc.message
+                    session.pending_approval_id = approval_id
+                    self._save_session(session)
+                    payload = {
+                        "status": "approval_required",
+                        "session_id": session.session_id,
+                        "approval_id": approval_id,
+                        "tool_name": exc.tool_name,
+                        "message": exc.message,
+                    }
+                    if emit:
+                        emit("approval_required", payload)
+                    return payload
+                except LLMError as exc:
+                    payload = {
+                        "status": "error",
+                        "session_id": session.session_id,
+                        "error": str(exc),
+                    }
+                    self._save_session(session)
+                    if emit:
+                        emit("error", payload)
+                    return payload
 
-        return payload
+                payload = {
+                    "status": "ok",
+                    "session_id": session.session_id,
+                    "response": response,
+                    "thinking": "".join(thinking_chunks).strip(),
+                    "phases": phases,
+                    "workspace_changes": workspace_changes[-1] if workspace_changes else None,
+                    "plan_update": plan_updates[-1] if plan_updates else None,
+                    "status_events": status_events,
+                    "agent_team": self._team_snapshot(session),
+                    "review_notes": session.agent.last_review_notes,
+                    "display_model": session.agent.llm.get_display_model(),
+                    "last_used_model": session.agent.llm.last_used_model,
+                    "last_route_reason": session.agent.llm.last_route_reason,
+                    "streamed_response": "".join(response_chunks).strip(),
+                }
+                self._save_session(session)
+
+            return payload
+        finally:
+            with session.control_lock:
+                if session.current_stop_event is stop_event:
+                    session.current_message = None
+                    session.current_stop_event = None
+                    session.stop_requested = False
 
     def _stream_operation(self, operation: Callable[[Callable[[str, dict[str, Any]], None]], dict[str, Any]]) -> Iterator[dict[str, Any]]:
         event_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
@@ -578,6 +624,7 @@ class HostedSessionService:
 
     def _config_snapshot(self, session: HostedSession) -> dict[str, Any]:
         workspace_info = session.agent.context.analyze()
+        run_command = session.agent.tool_registry.get("run_command")
         return {
             "session_id": session.session_id,
             "workspace": session.workspace,
@@ -587,6 +634,7 @@ class HostedSessionService:
             "agent_mode": session.config.agent_mode,
             "show_thinking": session.config.show_thinking,
             "auto_permission": session.config.auto_permission,
+            "command_policy": getattr(run_command, "execution_mode", "unknown"),
             "project_type": workspace_info.get("project_type", "unknown"),
             "technologies": workspace_info.get("technologies", []),
             "memory_enabled": session.agent.context.memory.has_saved_memory(),
@@ -837,6 +885,9 @@ class NeuDevHTTPRequestHandler(BaseHTTPRequestHandler):
                     return
                 if len(path_parts) == 4 and path_parts[3] == "summary" and method == "GET":
                     self._send_json(HTTPStatus.OK, self.server.service.get_summary(session_id))
+                    return
+                if len(path_parts) == 4 and path_parts[3] == "stop" and method == "POST":
+                    self._send_json(HTTPStatus.OK, self.server.service.request_stop(session_id))
                     return
                 if len(path_parts) == 4 and path_parts[3] == "close" and method == "POST":
                     self._send_json(HTTPStatus.OK, self.server.service.close_session(session_id))

@@ -7,6 +7,7 @@ import os
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -26,17 +27,22 @@ from rich.theme import Theme
 
 from neudev import __app_name__, __version__
 from neudev.agent import Agent
-from neudev.config import CONFIG_DIR, CONFIG_FILE, HISTORY_FILE, NeuDevConfig
+from neudev.config import CONFIG_DIR, CONFIG_FILE, HISTORY_FILE, VALID_COMMAND_POLICIES, NeuDevConfig
 from neudev.hosted_llm import HostedLLMClient
 from neudev.llm import ConnectionError as OllamaConnectionError
 from neudev.llm import LLMError, ModelNotFoundError
 from neudev.permissions import (
     PERMISSION_CHOICE_ALL,
     PERMISSION_CHOICE_DENY,
+    PERMISSION_CHOICE_ONCE,
+    PERMISSION_CHOICE_TOOL,
+    PermissionManager,
+    normalize_permission_choice,
     prompt_permission_choice,
 )
 from neudev.remote_api import RemoteAPIError, RemoteNeuDevClient, RemoteSessionClient
 from neudev.server import serve_api
+from neudev.tools.run_command import RunCommandTool
 
 
 THEME = Theme(
@@ -54,6 +60,30 @@ THEME = Theme(
 )
 
 console = Console(theme=THEME)
+LIGHTNING_ENV_KEYS = (
+    "LIGHTNING_CLUSTER_ID",
+    "LIGHTNING_CLOUD_PROJECT_ID",
+    "LIGHTNING_CLOUD_SPACE_ID",
+    "LIGHTNING_CLOUD_APP_ID",
+)
+TOOL_ACTIVITY_META = {
+    "read_file": ("READ", "info"),
+    "read_files_batch": ("READ", "info"),
+    "search_files": ("SEARCH", "accent"),
+    "grep_search": ("SEARCH", "accent"),
+    "symbol_search": ("SEARCH", "accent"),
+    "list_directory": ("SCAN", "info"),
+    "file_outline": ("SCAN", "info"),
+    "git_diff_review": ("REVIEW", "accent"),
+    "write_file": ("WRITE", "warning"),
+    "edit_file": ("EDIT", "warning"),
+    "smart_edit_file": ("EDIT", "warning"),
+    "python_ast_edit": ("PATCH", "warning"),
+    "js_ts_symbol_edit": ("PATCH", "warning"),
+    "delete_file": ("DELETE", "error"),
+    "run_command": ("RUN", "tool"),
+    "changed_files_diagnostics": ("VERIFY", "success"),
+}
 SLASH_COMMANDS = [
     "/help",
     "/models",
@@ -69,6 +99,8 @@ SLASH_COMMANDS = [
     "/thinking",
     "/language",
     "/agents",
+    "/approve",
+    "/deny",
     "/queue",
     "/stop",
 ]
@@ -124,6 +156,91 @@ def print_status_block(items: list[tuple[str, str, str]]) -> None:
     console.print()
 
 
+def _truncate_cli_value(value: str, limit: int = 88) -> str:
+    """Normalize CLI text to one line and cap the visible width."""
+    normalized = " ".join(str(value or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
+
+
+def is_lightning_workspace(workspace: str | None) -> bool:
+    """Return True when the workspace looks like a Lightning Studio mount."""
+    if any(os.environ.get(key) for key in LIGHTNING_ENV_KEYS):
+        return True
+    if not workspace:
+        return False
+    normalized = str(workspace).replace("\\", "/").lower()
+    return "/teamspace/studios/" in normalized
+
+
+def resolve_local_command_policy(
+    config: NeuDevConfig,
+    runtime_mode: str,
+    workspace: str | None,
+) -> tuple[str, str]:
+    """Resolve the effective local run_command policy and explain why."""
+    configured = (config.command_policy or "auto").strip().lower()
+    if configured != "auto":
+        return configured, "explicit"
+    if runtime_mode == "hybrid":
+        return "restricted", "hybrid default"
+    if is_lightning_workspace(workspace):
+        return "restricted", "Lightning workspace default"
+    return "permissive", "local default"
+
+
+def format_command_policy_display(config: NeuDevConfig, effective_policy: str, reason: str) -> str:
+    """Format the configured and effective policy for UI display."""
+    configured = (config.command_policy or "auto").strip().lower()
+    if configured == "auto":
+        return f"auto -> {effective_policy} ({reason})"
+    if configured == effective_policy:
+        return effective_policy
+    return f"{effective_policy} ({reason})"
+
+
+def apply_agent_command_policy(agent: Agent, config: NeuDevConfig, runtime_mode: str) -> tuple[str, str]:
+    """Apply the effective run_command policy for local or hybrid execution."""
+    effective_policy, reason = resolve_local_command_policy(config, runtime_mode, agent.workspace)
+    run_command = agent.tool_registry.get("run_command")
+    if isinstance(run_command, RunCommandTool):
+        extra_commands = [
+            item.strip()
+            for item in os.environ.get("NEUDEV_LOCAL_RUN_COMMAND_ALLOWLIST", "").split(",")
+            if item.strip()
+        ]
+        run_command.set_execution_mode(effective_policy, extra_allowed_commands=extra_commands)
+    display = format_command_policy_display(config, effective_policy, reason)
+    setattr(agent, "_command_policy_mode", effective_policy)
+    setattr(agent, "_command_policy_reason", reason)
+    setattr(agent, "_command_policy_display", display)
+    return effective_policy, display
+
+
+def render_turn_header(request: str, *, title: str, metadata: list[tuple[str, str]]) -> None:
+    """Render a compact execution header for the upcoming turn."""
+    lines = [f"[muted]{label:<16}[/muted] [white]{value}[/white]" for label, value in metadata if value]
+    lines.extend(
+        [
+            "",
+            "[bold white]Request[/bold white]",
+            f"[white]{_truncate_cli_value(request, limit=max(96, min(console.width * 2, 200)))}[/white]",
+        ]
+    )
+    console.print(
+        Panel(
+            "\n".join(lines),
+            border_style="bright_blue",
+            title=f"[bold bright_cyan]{title}[/bold bright_cyan]",
+            padding=(0, 1),
+            expand=False,
+            width=min(console.width, 96),
+        )
+    )
+    console.print()
+
+
 def build_prompt_session() -> PromptSession:
     """Build the interactive prompt session."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -137,6 +254,171 @@ def build_prompt_session() -> PromptSession:
         )
     except Exception:
         return PromptSession(completer=completer, style=pt_style)
+
+
+@dataclass
+class PendingLocalApproval:
+    """A permission request that must be answered from the main CLI prompt."""
+
+    tool_name: str
+    message: str
+    event: threading.Event = field(default_factory=threading.Event)
+    decision: str | None = None
+
+
+class InteractivePermissionManager(PermissionManager):
+    """Permission manager that defers local approvals to the main prompt loop."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._pending_lock = threading.Lock()
+        self._pending_request: PendingLocalApproval | None = None
+
+    def request_permission(self, tool_name: str, message: str) -> bool:
+        if self.auto_approve:
+            console.print(f"  [dim]Auto-approved: {tool_name}[/dim]")
+            return True
+        if self._session_approvals.get(tool_name):
+            console.print(f"  [dim]Previously approved: {tool_name}[/dim]")
+            return True
+        if self._consume_once_approval(tool_name):
+            return True
+
+        request = PendingLocalApproval(tool_name=tool_name, message=message)
+        with self._pending_lock:
+            if self._pending_request is not None:
+                raise RuntimeError("Another permission request is already pending.")
+            self._pending_request = request
+
+        console.print()
+        console.print(
+            Panel(
+                (
+                    f"[bold]{message}[/bold]\n\n"
+                    "[dim]Reply in the main prompt with "
+                    "`y`, `n`, `a`, `all`, `/approve`, or `/deny`.[/dim]"
+                ),
+                title=f"[yellow]⚠️  Permission Required: {tool_name}[/yellow]",
+                border_style="yellow",
+                padding=(0, 1),
+            )
+        )
+
+        request.event.wait()
+        decision = request.decision or PERMISSION_CHOICE_DENY
+        with self._pending_lock:
+            if self._pending_request is request:
+                self._pending_request = None
+
+        if decision == PERMISSION_CHOICE_TOOL:
+            self._session_approvals[tool_name] = True
+            return True
+        if decision == PERMISSION_CHOICE_ALL:
+            self.auto_approve = True
+            return True
+        return decision == PERMISSION_CHOICE_ONCE
+
+    def pending_request(self) -> PendingLocalApproval | None:
+        """Return the active local approval request, if any."""
+        with self._pending_lock:
+            return self._pending_request
+
+    def resolve_pending(self, decision: str) -> bool:
+        """Resolve the current pending request with a normalized decision."""
+        if decision not in {
+            PERMISSION_CHOICE_DENY,
+            PERMISSION_CHOICE_ONCE,
+            PERMISSION_CHOICE_TOOL,
+            PERMISSION_CHOICE_ALL,
+        }:
+            return False
+        with self._pending_lock:
+            request = self._pending_request
+            if request is None:
+                return False
+            request.decision = decision
+            request.event.set()
+            return True
+
+    def cancel_pending(self) -> bool:
+        """Deny the current pending request so a blocked worker can continue."""
+        return self.resolve_pending(PERMISSION_CHOICE_DENY)
+
+
+@dataclass
+class PendingRemoteApproval:
+    """A hosted approval request that is resolved from the main CLI prompt."""
+
+    approval_id: str
+    tool_name: str
+    message: str
+    event: threading.Event = field(default_factory=threading.Event)
+    decision: str | None = None
+
+
+class InteractiveRemoteApprovalManager:
+    """Defer hosted approvals to the main prompt while the worker thread waits."""
+
+    def __init__(self) -> None:
+        self._pending_lock = threading.Lock()
+        self._pending_request: PendingRemoteApproval | None = None
+
+    def request_approval(self, approval_id: str, tool_name: str, message: str) -> str:
+        request = PendingRemoteApproval(approval_id=approval_id, tool_name=tool_name, message=message)
+        with self._pending_lock:
+            if self._pending_request is not None:
+                raise RuntimeError("Another hosted approval is already pending.")
+            self._pending_request = request
+
+        console.print()
+        console.print(
+            Panel(
+                (
+                    f"[bold]{message}[/bold]\n\n"
+                    "[dim]Reply with `y`, `n`, `a`, or `all`.\n"
+                    "Use `/approve [once|tool|all]`, `/deny`, or `/stop`.[/dim]"
+                ),
+                title="[bold bright_yellow]Hosted Permission Required[/bold bright_yellow]",
+                border_style="bright_yellow",
+                padding=(1, 2),
+                expand=False,
+                width=min(console.width, 78),
+            )
+        )
+        console.print()
+
+        request.event.wait()
+        decision = request.decision or PERMISSION_CHOICE_DENY
+        with self._pending_lock:
+            if self._pending_request is request:
+                self._pending_request = None
+        return decision
+
+    def pending_request(self) -> PendingRemoteApproval | None:
+        """Return the current hosted approval request, if any."""
+        with self._pending_lock:
+            return self._pending_request
+
+    def resolve_pending(self, decision: str) -> bool:
+        """Resolve the pending hosted approval with a normalized decision."""
+        if decision not in {
+            PERMISSION_CHOICE_DENY,
+            PERMISSION_CHOICE_ONCE,
+            PERMISSION_CHOICE_TOOL,
+            PERMISSION_CHOICE_ALL,
+        }:
+            return False
+        with self._pending_lock:
+            request = self._pending_request
+            if request is None:
+                return False
+            request.decision = decision
+            request.event.set()
+            return True
+
+    def cancel_pending(self) -> bool:
+        """Deny the pending hosted approval so the worker can continue."""
+        return self.resolve_pending(PERMISSION_CHOICE_DENY)
 
 
 def handle_help() -> None:
@@ -163,8 +445,10 @@ def handle_help() -> None:
     table.add_row("/agents", "Set orchestration mode")
     table.add_row("/language", "Set reply language")
     table.add_row("/thinking", "Toggle local thinking display")
-    table.add_row("/queue", "Show active and pending local tasks")
-    table.add_row("/stop", "Stop the current local or hybrid task")
+    table.add_row("/approve", "Approve a pending tool permission")
+    table.add_row("/deny", "Deny a pending tool permission")
+    table.add_row("/queue", "Show active and pending tasks")
+    table.add_row("/stop", "Request cancellation for the active task or hosted turn")
     table.add_row("/version", "Show version info")
     table.add_row("/close", "Close the current remote session")
     table.add_row("/exit", "Disconnect from the current session")
@@ -180,7 +464,7 @@ def render_plan_panel(plan_update: dict | None) -> None:
     conventions = plan_update.get("conventions") or []
     lines = []
     if plan_items:
-        lines.append("[bold bright_yellow]Todo[/bold bright_yellow]")
+        lines.append("[bold bright_yellow]Execution Plan[/bold bright_yellow]")
         icon_map = {"pending": "☐", "in_progress": "◐", "completed": "☑"}
         priority = {"in_progress": 0, "pending": 1, "completed": 2}
         ordered_plan = sorted(
@@ -194,7 +478,7 @@ def render_plan_panel(plan_update: dict | None) -> None:
     if conventions:
         if lines:
             lines.append("")
-        lines.append("[bold bright_cyan]Follow Existing Patterns[/bold bright_cyan]")
+        lines.append("[bold bright_cyan]Repository Conventions[/bold bright_cyan]")
         lines.extend(f"- {item}" for item in conventions[:2])
         if len(conventions) > 2:
             lines.append(f"[dim]... {len(conventions) - 2} more conventions[/dim]")
@@ -204,7 +488,7 @@ def render_plan_panel(plan_update: dict | None) -> None:
         Panel(
             "\n".join(lines),
             border_style="bright_yellow",
-            title="[bold bright_yellow]📝 Plan[/bold bright_yellow]",
+            title="[bold bright_yellow]Plan Update[/bold bright_yellow]",
             padding=(0, 1),
             expand=False,
             width=min(console.width, 72),
@@ -226,9 +510,19 @@ def render_workspace_change(changes: dict | None) -> None:
             preview.extend(items[:3])
     if not parts:
         return
-    console.print(f"  [warning]📝 External workspace changes detected: {', '.join(parts)}[/warning]")
+    lines = [f"[warning]Detected workspace changes:[/warning] {', '.join(parts)}"]
     if preview:
-        console.print(f"  [dim]{', '.join(preview[:6])}[/dim]")
+        lines.append(f"[dim]{', '.join(preview[:6])}[/dim]")
+    console.print(
+        Panel(
+            "\n".join(lines),
+            border_style="bright_yellow",
+            title="[bold bright_yellow]Workspace Delta[/bold bright_yellow]",
+            padding=(0, 1),
+            expand=False,
+            width=min(console.width, 84),
+        )
+    )
     console.print()
 
 
@@ -244,7 +538,7 @@ def render_thinking(thinking: str) -> None:
         Panel(
             f"[dim italic]{body}[/dim italic]",
             border_style="grey50",
-            title="[grey62]💭 Thinking Snapshot[/grey62]",
+            title="[grey62]Reasoning Snapshot[/grey62]",
             padding=(0, 1),
             expand=True,
         )
@@ -252,10 +546,29 @@ def render_thinking(thinking: str) -> None:
     console.print()
 
 
+def render_phase_event(phase: str, model_name: str) -> None:
+    """Render the current execution phase in a consistent format."""
+    labels = {
+        "planner": "PLAN",
+        "executor": "EXECUTE",
+        "reviewer": "REVIEW",
+        "verify": "VERIFY",
+    }
+    label = labels.get(str(phase or "").strip().lower(), str(phase or "step").upper())
+    model = model_name or "default model"
+    console.print(f"    [accent]{label:<8}[/accent] [dim]{model}[/dim]")
+
+
+def _tool_activity_style(tool_name: str) -> tuple[str, str]:
+    """Return a compact label and color for a tool event."""
+    return TOOL_ACTIVITY_META.get(tool_name, ("TOOL", "tool"))
+
+
 def render_tool_event(tool_name: str, payload: dict | None) -> None:
     """Render compact live tool activity."""
     payload = payload or {}
     event_type = str(payload.get("event", "start"))
+    activity_label, activity_style = _tool_activity_style(tool_name)
     target = (
         payload.get("target")
         or payload.get("path")
@@ -263,38 +576,46 @@ def render_tool_event(tool_name: str, payload: dict | None) -> None:
         or payload.get("directory")
         or ""
     )
-    target_text = str(target).strip()
+    target_text = _truncate_cli_value(str(target).strip() or tool_name, limit=92)
 
     if event_type == "progress":
         elapsed = payload.get("elapsed", 0)
         started_at = payload.get("started_at", "")
         mode = str(payload.get("mode", "background_wait"))
-        if mode == "stop_requested":
-            status = "stop requested"
-        else:
-            status = f"running {elapsed}s"
+        state = "STOP" if mode == "stop_requested" else "WAIT"
+        detail = "stop requested" if mode == "stop_requested" else f"running {elapsed}s"
+        suffix = f"{detail} | started {started_at}".strip(" |")
         console.print(
-            f"    [warning]⏳ {tool_name}[/warning]  "
-            f"[dim]{target_text} · {status} · started {started_at}[/dim]"
+            f"    [{activity_style}]{activity_label:<7}[/{activity_style}] "
+            f"[warning]{state}[/warning] [white]{target_text}[/white] [dim]{suffix}[/dim]"
         )
         return
 
     if event_type == "result":
-        status_icon = "✅" if payload.get("success", True) else "❌"
-        parts = [target_text] if target_text else []
+        success = payload.get("success", True)
+        state = "DONE" if success else "FAIL"
+        state_style = "success" if success else "error"
+        parts = []
         lines_added = int(payload.get("lines_added", 0) or 0)
         lines_deleted = int(payload.get("lines_deleted", 0) or 0)
         if lines_added or lines_deleted:
             parts.append(f"+{lines_added}/-{lines_deleted} lines")
         elif payload.get("result_preview"):
-            parts.append(str(payload.get("result_preview")))
+            parts.append(_truncate_cli_value(str(payload.get("result_preview")), limit=72))
         parts.append(f"{payload.get('elapsed', 0)}s")
-        console.print(f"    {status_icon} [tool]{tool_name}[/tool]  [dim]{' · '.join(part for part in parts if part)}[/dim]")
+        console.print(
+            f"    [{activity_style}]{activity_label:<7}[/{activity_style}] "
+            f"[{state_style}]{state}[/{state_style}] [white]{target_text}[/white] "
+            f"[dim]{' | '.join(part for part in parts if part)}[/dim]"
+        )
         return
 
     started_at = payload.get("started_at", "")
-    meta = f"{target_text} · started {started_at}".strip(" ·")
-    console.print(f"    [tool]🔧 {tool_name}[/tool]  [dim]{meta}[/dim]")
+    suffix = f"started {started_at}".strip()
+    console.print(
+        f"    [{activity_style}]{activity_label:<7}[/{activity_style}] "
+        f"[info]START[/info] [white]{target_text}[/white] [dim]{suffix}[/dim]"
+    )
 
 
 def render_agent_routing(
@@ -328,7 +649,7 @@ def render_agent_routing(
 def render_response_panel(response: str) -> None:
     """Render the final agent response panel."""
     if not response:
-        console.print("  [dim]🤖 No response from agent.[/dim]\n")
+        console.print("  [dim]No response from the agent.[/dim]\n")
         return
     try:
         body = Markdown(response)
@@ -338,7 +659,7 @@ def render_response_panel(response: str) -> None:
         Panel(
             body,
             border_style="bright_blue",
-            title="[bold bright_cyan]🤖 NeuDev[/bold bright_cyan]",
+            title="[bold bright_cyan]Agent Response[/bold bright_cyan]",
             padding=(1, 2),
             expand=True,
         )
@@ -813,6 +1134,7 @@ def handle_local_config(agent: Agent) -> None:
     """Render local config."""
     config = agent.config
     workspace_info = agent.context.analyze()
+    command_policy = getattr(agent, "_command_policy_display", "unknown")
     console.print()
     table = Table(
         title="[bold bright_cyan]⚙️  Local Configuration[/bold bright_cyan]",
@@ -831,6 +1153,7 @@ def handle_local_config(agent: Agent) -> None:
     table.add_row("Agent Mode", config.agent_mode)
     table.add_row("Reply Language", config.response_language)
     table.add_row("Auto Permission", "ON" if agent.permissions.auto_approve else "OFF")
+    table.add_row("Command Policy", command_policy)
     table.add_row("Workspace Type", workspace_info.get("project_type", "unknown"))
     table.add_row("Tech Stack", ", ".join(workspace_info.get("technologies", [])[:4]) or "unknown")
     table.add_row("Show Thinking", "ON" if config.show_thinking else "OFF")
@@ -865,6 +1188,7 @@ def handle_remote_config(session: RemoteSessionClient, config: NeuDevConfig) -> 
     table.add_row("Agent Mode", remote.get("agent_mode", config.agent_mode))
     table.add_row("Reply Language", remote.get("response_language", config.response_language))
     table.add_row("Auto Permission", "ON" if remote.get("auto_permission") else "OFF")
+    table.add_row("Hosted Command Policy", remote.get("command_policy", "unknown"))
     table.add_row("Show Thinking", "ON" if remote.get("show_thinking") else "OFF")
     table.add_row("Stream Transport", config.stream_transport)
     table.add_row("WebSocket URL", config.websocket_base_url or "(auto)")
@@ -877,6 +1201,7 @@ def handle_remote_config(session: RemoteSessionClient, config: NeuDevConfig) -> 
 def handle_hybrid_config(agent: Agent, config: NeuDevConfig) -> None:
     """Render hybrid runtime config."""
     workspace_info = agent.context.analyze()
+    command_policy = getattr(agent, "_command_policy_display", "unknown")
     console.print()
     table = Table(
         title="[bold bright_cyan]⚙️  Hybrid Configuration[/bold bright_cyan]",
@@ -896,6 +1221,7 @@ def handle_hybrid_config(agent: Agent, config: NeuDevConfig) -> None:
     table.add_row("Agent Mode", config.agent_mode)
     table.add_row("Reply Language", config.response_language)
     table.add_row("Auto Permission", "ON" if agent.permissions.auto_approve else "OFF")
+    table.add_row("Command Policy", command_policy)
     table.add_row("Secret Redaction", "ON" if config.hybrid_redact_secrets else "OFF")
     table.add_row("Payload Limit", f"{config.hybrid_max_payload_bytes} bytes")
     table.add_row("Workspace Type", workspace_info.get("project_type", "unknown"))
@@ -996,8 +1322,21 @@ def handle_remote_thinking(session: RemoteSessionClient, config: NeuDevConfig) -
 
 def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) -> str | None:
     """Process a local user message."""
+    runtime_label = "hybrid" if agent.config.runtime_mode == "hybrid" else "local"
+    command_policy_display = getattr(agent, "_command_policy_display", "unknown")
     console.print()
-    console.print("  [dim]🧠 Working... live plan and tool updates below.[/dim]")
+    render_turn_header(
+        user_input,
+        title="Execution Trace",
+        metadata=[
+            ("Runtime", runtime_label),
+            ("Workspace", _truncate_cli_value(agent.workspace, limit=72)),
+            ("Model", agent.llm.get_display_model()),
+            ("Orchestration", agent.config.agent_mode),
+            ("Command Policy", command_policy_display),
+        ],
+    )
+    console.print("  [dim]Live plan, tool, and verification events appear below. Use /stop to request cancellation.[/dim]")
     console.print()
     thinking_parts: list[str] = []
     response = ""
@@ -1007,9 +1346,7 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
             user_input,
             on_status=render_tool_event,
             on_thinking=thinking_parts.append,
-            on_phase=lambda phase, model_name: console.print(
-                f"    [accent]{phase}[/accent]  [dim]{model_name}[/dim]"
-            ),
+            on_phase=render_phase_event,
             on_workspace_change=render_workspace_change,
             on_plan_update=lambda plan, conventions: render_plan_panel(
                 {"plan": [dict(item) for item in plan], "conventions": list(conventions)}
@@ -1060,10 +1397,45 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
 
 def _summarize_queue_item(text: str, limit: int = 72) -> str:
     """Render queued user input on one compact line."""
-    normalized = " ".join(str(text).split())
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: limit - 3].rstrip() + "..."
+    return _truncate_cli_value(str(text), limit=limit)
+
+
+def _render_queue_panel(
+    active: str | None,
+    pending: list[str],
+    *,
+    title: str,
+    empty_message: str,
+) -> None:
+    """Render an active-task and pending-task queue panel."""
+    if not active and not pending:
+        console.print(f"\n  [dim]{empty_message}[/dim]\n")
+        return
+
+    lines: list[str] = []
+    if active:
+        lines.append("[bold bright_yellow]Active[/bold bright_yellow]")
+        lines.append(f"1. {_summarize_queue_item(active)}")
+    if pending:
+        if lines:
+            lines.append("")
+        lines.append("[bold bright_cyan]Pending[/bold bright_cyan]")
+        for index, item in enumerate(pending[:4], 1):
+            lines.append(f"{index}. {_summarize_queue_item(item)}")
+        if len(pending) > 4:
+            lines.append(f"[dim]... {len(pending) - 4} more queued tasks[/dim]")
+
+    console.print(
+        Panel(
+            "\n".join(lines),
+            border_style="bright_blue",
+            title=title,
+            padding=(0, 1),
+            expand=False,
+            width=min(console.width, 78),
+        )
+    )
+    console.print()
 
 
 class QueuedLocalTaskRunner:
@@ -1186,44 +1558,128 @@ class QueuedLocalTaskRunner:
 def render_local_queue(runner: QueuedLocalTaskRunner) -> None:
     """Show the active local task and queued follow-up prompts."""
     active, pending = runner.snapshot()
-    if not active and not pending:
-        console.print("\n  [dim]📭 No active or pending local tasks.[/dim]\n")
-        return
-
-    lines: list[str] = []
-    if active:
-        lines.append("[bold bright_yellow]Active[/bold bright_yellow]")
-        lines.append(f"• {_summarize_queue_item(active)}")
-    if pending:
-        if lines:
-            lines.append("")
-        lines.append("[bold bright_cyan]Pending[/bold bright_cyan]")
-        for index, item in enumerate(pending[:4], 1):
-            lines.append(f"{index}. {_summarize_queue_item(item)}")
-        if len(pending) > 4:
-            lines.append(f"[dim]... {len(pending) - 4} more queued tasks[/dim]")
-
-    console.print(
-        Panel(
-            "\n".join(lines),
-            border_style="bright_blue",
-            title="[bold bright_blue]⏱ Queue[/bold bright_blue]",
-            padding=(0, 1),
-            expand=False,
-            width=min(console.width, 78),
-        )
+    _render_queue_panel(
+        active,
+        pending,
+        title="[bold bright_blue]Task Queue[/bold bright_blue]",
+        empty_message="No active or pending local tasks.",
     )
-    console.print()
 
 
-def handle_local_stop(runner: QueuedLocalTaskRunner) -> None:
+def handle_local_stop(
+    runner: QueuedLocalTaskRunner,
+    permission_manager: InteractivePermissionManager | None = None,
+) -> None:
     """Request cancellation of the current local or hybrid task."""
-    if runner.request_stop():
+    stop_requested = runner.request_stop()
+    pending_cleared = permission_manager.cancel_pending() if permission_manager is not None else False
+    if stop_requested:
+        message = "Stop requested. NeuDev will halt after the current model/tool step returns."
+        if pending_cleared:
+            message += " The pending permission was denied so the task can exit."
         console.print(
-            "\n  [warning]⏹ Stop requested. NeuDev will halt after the current model/tool step returns.[/warning]\n"
+            f"\n  [warning]⏹ {message}[/warning]\n"
         )
+    elif pending_cleared:
+        console.print("\n  [warning]⏹ Pending permission denied.[/warning]\n")
     else:
         console.print("\n  [dim]📭 No active local task to stop.[/dim]\n")
+
+
+def handle_local_permission_input(
+    permission_manager: InteractivePermissionManager,
+    user_input: str,
+) -> bool:
+    """Resolve an in-flight local permission request from the main prompt."""
+    pending = permission_manager.pending_request()
+    if pending is None:
+        return False
+
+    raw = user_input.strip()
+    warning = (
+        "\n  [warning]⚠️  A permission request is waiting. Reply with `y`, `n`, `a`, `all`, "
+        "`/approve [once|tool|all]`, or `/deny`.[/warning]\n"
+    )
+    decision: str | None
+
+    if raw.lower().startswith("/approve"):
+        parts = raw.split(maxsplit=1)
+        scope_text = parts[1].strip() if len(parts) > 1 else "once"
+        decision = normalize_permission_choice(scope_text)
+        if decision is None:
+            console.print(
+                "\n  [warning]⚠️  Invalid approval scope. Use `/approve`, `/approve tool`, `/approve all`, or `/deny`.[/warning]\n"
+            )
+            return True
+    elif raw.lower().startswith("/deny"):
+        decision = PERMISSION_CHOICE_DENY
+    else:
+        decision = normalize_permission_choice(raw)
+        if decision is None:
+            console.print(warning)
+            return True
+
+    if not permission_manager.resolve_pending(decision):
+        console.print("\n  [dim]📭 No pending permission request.[/dim]\n")
+        return True
+
+    if decision == PERMISSION_CHOICE_DENY:
+        console.print(f"\n  [warning]✗ Denied `{pending.tool_name}`.[/warning]\n")
+    elif decision == PERMISSION_CHOICE_TOOL:
+        console.print(f"\n  [success]✓ Approved `{pending.tool_name}` for this session.[/success]\n")
+    elif decision == PERMISSION_CHOICE_ALL:
+        console.print("\n  [success]✓ Approved all destructive actions for this session.[/success]\n")
+    else:
+        console.print(f"\n  [success]✓ Approved `{pending.tool_name}` once.[/success]\n")
+    return True
+
+
+def handle_remote_permission_input(
+    permission_manager: InteractiveRemoteApprovalManager,
+    user_input: str,
+) -> bool:
+    """Resolve an in-flight hosted permission request from the main prompt."""
+    pending = permission_manager.pending_request()
+    if pending is None:
+        return False
+
+    raw = user_input.strip()
+    warning = (
+        "\n  [warning]A hosted permission request is waiting. Reply with `y`, `n`, `a`, `all`, "
+        "`/approve [once|tool|all]`, or `/deny`.[/warning]\n"
+    )
+    decision: str | None
+
+    if raw.lower().startswith("/approve"):
+        parts = raw.split(maxsplit=1)
+        scope_text = parts[1].strip() if len(parts) > 1 else "once"
+        decision = normalize_permission_choice(scope_text)
+        if decision is None:
+            console.print(
+                "\n  [warning]Invalid approval scope. Use `/approve`, `/approve tool`, `/approve all`, or `/deny`.[/warning]\n"
+            )
+            return True
+    elif raw.lower().startswith("/deny"):
+        decision = PERMISSION_CHOICE_DENY
+    else:
+        decision = normalize_permission_choice(raw)
+        if decision is None:
+            console.print(warning)
+            return True
+
+    if not permission_manager.resolve_pending(decision):
+        console.print("\n  [dim]No pending hosted permission request.[/dim]\n")
+        return True
+
+    if decision == PERMISSION_CHOICE_DENY:
+        console.print(f"\n  [warning]Denied hosted action `{pending.tool_name}`.[/warning]\n")
+    elif decision == PERMISSION_CHOICE_TOOL:
+        console.print(f"\n  [success]Approved hosted action `{pending.tool_name}` for this session.[/success]\n")
+    elif decision == PERMISSION_CHOICE_ALL:
+        console.print("\n  [success]Approved all hosted destructive actions for this session.[/success]\n")
+    else:
+        console.print(f"\n  [success]Approved hosted action `{pending.tool_name}` once.[/success]\n")
+    return True
 
 
 def _render_busy_command_warning(command: str) -> None:
@@ -1237,6 +1693,7 @@ def run_local_agent_loop(agent: Agent, config: NeuDevConfig, *, runtime_mode: st
     """Run the interactive loop for local and hybrid runtimes."""
     prompt_session = build_prompt_session()
     runner = QueuedLocalTaskRunner(agent)
+    permission_manager = agent.permissions if isinstance(agent.permissions, InteractivePermissionManager) else None
     safe_busy_commands = {"/help", "/queue", "/stop", "/version", "/exit", "/quit"}
 
     try:
@@ -1245,6 +1702,8 @@ def run_local_agent_loop(agent: Agent, config: NeuDevConfig, *, runtime_mode: st
                 with patch_stdout(raw=True):
                     user_input = prompt_session.prompt([("class:prompt", "neudev ❯ ")]).strip()
             except (KeyboardInterrupt, EOFError):
+                if permission_manager is not None:
+                    permission_manager.cancel_pending()
                 if runner.is_busy() or runner.pending_count():
                     console.print("\n  [warning]⏹ Stopping the active task and clearing pending work...[/warning]\n")
                     runner.shutdown(cancel_pending=True, stop_current=True)
@@ -1259,6 +1718,8 @@ def run_local_agent_loop(agent: Agent, config: NeuDevConfig, *, runtime_mode: st
             has_active_work = runner.is_busy() or runner.pending_count() > 0
 
             if cmd in ("/exit", "/quit"):
+                if permission_manager is not None:
+                    permission_manager.cancel_pending()
                 if has_active_work:
                     console.print("\n  [warning]⏹ Stopping the active task and clearing pending work...[/warning]\n")
                     runner.shutdown(cancel_pending=True, stop_current=True)
@@ -1269,9 +1730,14 @@ def run_local_agent_loop(agent: Agent, config: NeuDevConfig, *, runtime_mode: st
             elif cmd == "/queue":
                 render_local_queue(runner)
             elif cmd == "/stop":
-                handle_local_stop(runner)
+                handle_local_stop(runner, permission_manager)
             elif cmd == "/version":
                 console.print(f"\n  [bold bright_cyan]⚡ {__app_name__}[/bold bright_cyan] [dim]v{__version__}[/dim]\n")
+            elif permission_manager is not None and permission_manager.pending_request() is not None:
+                if handle_local_permission_input(permission_manager, user_input):
+                    continue
+            elif cmd in {"/approve", "/deny"}:
+                console.print("\n  [dim]📭 No pending permission request.[/dim]\n")
             elif has_active_work and user_input.startswith("/") and cmd not in safe_busy_commands:
                 _render_busy_command_warning(cmd)
             elif cmd == "/models":
@@ -1327,6 +1793,8 @@ def run_local_agent_loop(agent: Agent, config: NeuDevConfig, *, runtime_mode: st
                         f"\n  [dim]🕒 Queued pending task #{queue_position}. It will run after the current task.[/dim]\n"
                     )
     finally:
+        if permission_manager is not None:
+            permission_manager.cancel_pending()
         runner.shutdown(cancel_pending=False, stop_current=False)
 
 
@@ -1334,6 +1802,8 @@ def _consume_remote_stream(
     session: RemoteSessionClient,
     config: NeuDevConfig,
     stream,
+    *,
+    approval_manager: InteractiveRemoteApprovalManager | None = None,
 ) -> dict[str, object] | None:
     """Render streamed remote events and return the final payload."""
     final_payload = None
@@ -1345,14 +1815,21 @@ def _consume_remote_stream(
         if event_name == "workspace_change":
             render_workspace_change(payload)
         elif event_name == "phase":
-            console.print(f"    [accent]{payload.get('phase', '')}[/accent]  [dim]{payload.get('model', '')}[/dim]")
+            render_phase_event(payload.get("phase", ""), payload.get("model", ""))
         elif event_name == "status":
             render_tool_event(payload.get("tool", ""), payload.get("args", {}))
         elif event_name == "plan_update":
             render_plan_panel(payload)
         elif event_name == "approval_required":
-            console.print()
-            decision = ask_remote_permission(payload.get("tool_name", "tool"), payload.get("message", ""))
+            if approval_manager is None:
+                console.print()
+                decision = ask_remote_permission(payload.get("tool_name", "tool"), payload.get("message", ""))
+            else:
+                decision = approval_manager.request_approval(
+                    payload["approval_id"],
+                    payload.get("tool_name", "tool"),
+                    payload.get("message", ""),
+                )
             approved = decision != PERMISSION_CHOICE_DENY
             if decision == PERMISSION_CHOICE_ALL:
                 config.apply_runtime_updates(persist=False, auto_permission=True)
@@ -1365,6 +1842,7 @@ def _consume_remote_stream(
                     scope=decision if approved else None,
                     transport=config.stream_transport,
                 ),
+                approval_manager=approval_manager,
             )
         elif event_name == "error":
             render_remote_error(payload)
@@ -1375,16 +1853,37 @@ def _consume_remote_stream(
     return final_payload
 
 
-def process_remote_user_input(session: RemoteSessionClient, config: NeuDevConfig, user_input: str) -> None:
+def process_remote_user_input(
+    session: RemoteSessionClient,
+    config: NeuDevConfig,
+    user_input: str,
+    *,
+    approval_manager: InteractiveRemoteApprovalManager | None = None,
+) -> None:
     """Process a remote user message."""
+    remote_snapshot = session.config_snapshot or {}
     console.print()
-    console.print("  [dim]🌐 Hosted stream active... live plan and tool updates below.[/dim]")
+    render_turn_header(
+        user_input,
+        title="Hosted Execution Trace",
+        metadata=[
+            ("Runtime", "remote"),
+            ("Session", session.session_id),
+            ("Workspace", _truncate_cli_value(remote_snapshot.get("workspace", session.workspace), limit=72)),
+            ("Model", remote_snapshot.get("model", config.model)),
+            ("Orchestration", remote_snapshot.get("agent_mode", config.agent_mode)),
+            ("Streaming", config.stream_transport),
+            ("Hosted Policy", remote_snapshot.get("command_policy", "unknown")),
+        ],
+    )
+    console.print("  [dim]Hosted plan, tool, and verification events appear below. Use /stop to interrupt the active turn.[/dim]")
     console.print()
     try:
         payload = _consume_remote_stream(
             session,
             config,
             session.stream_message(user_input, transport=config.stream_transport),
+            approval_manager=approval_manager,
         )
     except RemoteAPIError as exc:
         console.print(
@@ -1416,6 +1915,173 @@ def process_remote_user_input(session: RemoteSessionClient, config: NeuDevConfig
         last_route_reason=payload.get("last_route_reason", ""),
     )
     render_response_panel(payload.get("response") or payload.get("streamed_response", ""))
+
+
+class QueuedRemoteTaskRunner:
+    """Run remote turns sequentially while keeping the hosted prompt interactive."""
+
+    def __init__(
+        self,
+        session: RemoteSessionClient,
+        config: NeuDevConfig,
+        approval_manager: InteractiveRemoteApprovalManager,
+        *,
+        processor=None,
+    ) -> None:
+        self.session = session
+        self.config = config
+        self.approval_manager = approval_manager
+        self._processor = processor or process_remote_user_input
+        self._pending: deque[str] = deque()
+        self._condition = threading.Condition()
+        self._shutdown = False
+        self._current_message: str | None = None
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            name="neudev-remote-task-runner",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def submit(self, user_input: str) -> int:
+        """Queue a hosted turn and return its queue position, or 0 if it starts now."""
+        message = user_input.strip()
+        if not message:
+            return 0
+        with self._condition:
+            was_busy = self._current_message is not None or bool(self._pending)
+            self._pending.append(message)
+            position = len(self._pending)
+            self._condition.notify()
+            return position if was_busy else 0
+
+    def is_busy(self) -> bool:
+        """Return True when a hosted turn is currently running or waiting for approval."""
+        with self._condition:
+            return self._current_message is not None
+
+    def pending_count(self) -> int:
+        """Return the number of queued hosted turns waiting to run."""
+        with self._condition:
+            return len(self._pending)
+
+    def snapshot(self) -> tuple[str | None, list[str]]:
+        """Return the active hosted turn and queued follow-up turns."""
+        with self._condition:
+            return self._current_message, list(self._pending)
+
+    def request_stop(self) -> dict[str, object]:
+        """Cancel the blocked approval or request stop for the active hosted turn."""
+        pending_approval = self.approval_manager.pending_request()
+        if pending_approval is not None:
+            self.approval_manager.cancel_pending()
+            return {
+                "status": "approval_denied",
+                "message": f"Denied pending hosted approval for {pending_approval.tool_name}.",
+                "approval_id": pending_approval.approval_id,
+            }
+
+        with self._condition:
+            if self._current_message is None:
+                return {"status": "idle", "message": "No active hosted turn."}
+        try:
+            return self.session.request_stop()
+        except RemoteAPIError as exc:
+            return {"status": "error", "message": str(exc)}
+
+    def wait_until_idle(self, timeout: float | None = None) -> bool:
+        """Block until the hosted turn and queue are empty."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._condition:
+            while self._current_message is not None or self._pending:
+                if deadline is None:
+                    self._condition.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._condition.wait(timeout=remaining)
+            return True
+
+    def shutdown(
+        self,
+        *,
+        cancel_pending: bool = False,
+        stop_current: bool = False,
+        join_timeout: float = 2.0,
+    ) -> None:
+        """Stop the worker and optionally clear queued or active hosted work."""
+        with self._condition:
+            self._shutdown = True
+            if cancel_pending:
+                self._pending.clear()
+            self._condition.notify_all()
+        if cancel_pending:
+            self.approval_manager.cancel_pending()
+        if stop_current:
+            self.request_stop()
+        self._worker.join(timeout=join_timeout)
+
+    def _worker_loop(self) -> None:
+        """Consume hosted turns one at a time."""
+        while True:
+            should_exit = False
+            with self._condition:
+                while not self._pending and not self._shutdown:
+                    self._condition.wait()
+                if self._shutdown and not self._pending:
+                    return
+                if not self._pending:
+                    continue
+                message = self._pending.popleft()
+                self._current_message = message
+
+            try:
+                self._processor(
+                    self.session,
+                    self.config,
+                    message,
+                    approval_manager=self.approval_manager,
+                )
+            finally:
+                with self._condition:
+                    self._current_message = None
+                    remaining = len(self._pending)
+                    should_exit = self._shutdown and not self._pending
+                    self._condition.notify_all()
+                if remaining:
+                    console.print(f"\n  [dim]Hosted queue: {remaining} task(s) remaining.[/dim]\n")
+            if should_exit:
+                return
+
+
+def render_remote_queue(runner: QueuedRemoteTaskRunner) -> None:
+    """Show the active hosted turn and queued follow-up requests."""
+    active, pending = runner.snapshot()
+    _render_queue_panel(
+        active,
+        pending,
+        title="[bold bright_blue]Hosted Queue[/bold bright_blue]",
+        empty_message="No active or pending hosted tasks.",
+    )
+
+
+def handle_remote_stop(runner: QueuedRemoteTaskRunner) -> None:
+    """Request cancellation for the active hosted turn."""
+    result = runner.request_stop()
+    status = str(result.get("status", "error"))
+    if status == "stop_requested":
+        console.print("\n  [warning]Stop requested. The hosted turn will halt after the current model or tool step returns.[/warning]\n")
+    elif status == "already_requested":
+        console.print("\n  [warning]Stop was already requested for the active hosted turn.[/warning]\n")
+    elif status == "approval_denied":
+        console.print("\n  [warning]Pending hosted permission denied. The blocked turn will now finish cleanly.[/warning]\n")
+    elif status == "awaiting_approval":
+        console.print("\n  [warning]A hosted approval is still pending. Use `/approve`, `/deny`, or `/stop` again after it clears.[/warning]\n")
+    elif status == "idle":
+        console.print("\n  [dim]No active hosted turn to stop.[/dim]\n")
+    else:
+        console.print(f"\n  [error]Failed to stop hosted turn: {result.get('message', 'Unknown error')}[/error]\n")
 
 
 def handle_local_exit(agent: Agent) -> None:
@@ -1476,7 +2142,11 @@ def run_local_cli(config: NeuDevConfig, workspace: str | None = None) -> None:
     try:
         with console.status("[bold bright_cyan]⏳ Initializing NeuDev...[/bold bright_cyan]", spinner="dots"):
             agent = Agent(config, workspace)
-            agent.permissions.auto_approve = config.auto_permission
+            permissions = InteractivePermissionManager()
+            permissions.auto_approve = config.auto_permission
+            agent.permissions = permissions
+            agent.config.apply_runtime_updates(persist=False, runtime_mode="local")
+            _, command_policy_display = apply_agent_command_policy(agent, config, "local")
     except OllamaConnectionError as exc:
         console.print(
             Panel(
@@ -1498,6 +2168,7 @@ def run_local_cli(config: NeuDevConfig, workspace: str | None = None) -> None:
             ("✅", "Local agent ready", "success"),
             ("✅", f"Model: {agent.llm.get_display_model()}", "success"),
             ("✅", f"Orchestration: {config.agent_mode}", "success"),
+            ("✅", f"Command Policy: {command_policy_display}", "success"),
             ("✅", f"Tools: {len(agent.tool_registry.get_all())} loaded", "success"),
         ]
     )
@@ -1518,8 +2189,11 @@ def run_hybrid_cli(config: NeuDevConfig, workspace: str | None = None) -> None:
         with console.status("[bold bright_cyan]🌩️ Connecting local agent to hosted inference...[/bold bright_cyan]", spinner="dots"):
             llm_client = HostedLLMClient(config, api_base_url, api_key)
             agent = Agent(config, workspace, llm_client=llm_client)
-            agent.permissions.auto_approve = config.auto_permission
+            permissions = InteractivePermissionManager()
+            permissions.auto_approve = config.auto_permission
+            agent.permissions = permissions
             config.update(runtime_mode="hybrid")
+            _, command_policy_display = apply_agent_command_policy(agent, config, "hybrid")
     except (ModelNotFoundError, LLMError) as exc:
         console.print(f"\n  [error]❌ Failed to initialize hybrid NeuDev: {exc}[/error]\n")
         return
@@ -1530,6 +2204,7 @@ def run_hybrid_cli(config: NeuDevConfig, workspace: str | None = None) -> None:
             ("✅", f"Hosted inference: {api_base_url}", "success"),
             ("✅", f"Model: {agent.llm.get_display_model()}", "success"),
             ("✅", f"Orchestration: {config.agent_mode}", "success"),
+            ("✅", f"Command Policy: {command_policy_display}", "success"),
             ("✅", f"Tools: {len(agent.tool_registry.get_all())} local", "success"),
         ]
     )
@@ -1593,6 +2268,7 @@ def run_remote_cli(config: NeuDevConfig, workspace: str | None = None, session_i
             ("✅", f"Remote workspace: {remote_config.get('workspace', remote_workspace)}", "success"),
             ("✅", f"Model: {remote_config.get('model', config.model)}", "success"),
             ("✅", f"Orchestration: {remote_config.get('agent_mode', config.agent_mode)}", "success"),
+            ("✅", f"Hosted Policy: {remote_config.get('command_policy', 'unknown')}", "success"),
             ("✅", f"Streaming: {stream_label}", "success"),
         ]
     )
@@ -1600,67 +2276,96 @@ def run_remote_cli(config: NeuDevConfig, workspace: str | None = None, session_i
     console.print()
 
     prompt_session = build_prompt_session()
-    while True:
-        try:
-            user_input = prompt_session.prompt([("class:prompt", "neudev ❯ ")]).strip()
-        except (KeyboardInterrupt, EOFError):
-            handle_remote_exit(session)
-            break
-        if not user_input:
-            continue
+    approval_manager = InteractiveRemoteApprovalManager()
+    runner = QueuedRemoteTaskRunner(session, config, approval_manager)
+    safe_busy_commands = {"/help", "/queue", "/stop", "/version", "/exit", "/quit"}
 
-        parts = user_input.split(maxsplit=1)
-        cmd = parts[0].lower()
-        arg = parts[1].strip() if len(parts) > 1 else ""
+    try:
+        while True:
+            try:
+                with patch_stdout(raw=True):
+                    user_input = prompt_session.prompt([("class:prompt", "neudev ❯ ")]).strip()
+            except (KeyboardInterrupt, EOFError):
+                approval_manager.cancel_pending()
+                if runner.is_busy() or runner.pending_count():
+                    console.print("\n  [warning]Stopping the active hosted turn and clearing pending work...[/warning]\n")
+                    runner.shutdown(cancel_pending=True, stop_current=True)
+                handle_remote_exit(session)
+                break
+            if not user_input:
+                continue
 
-        if cmd in ("/exit", "/quit"):
-            handle_remote_exit(session)
-            break
-        if cmd == "/help":
-            handle_help()
-        elif cmd == "/models":
-            handle_remote_models(session, config, arg or None)
-        elif cmd == "/sessions":
-            handle_remote_sessions(client)
-        elif cmd == "/clear":
-            try:
-                session.clear_history()
-                console.print("\n  [success]✅ Remote conversation history cleared.[/success]\n")
-            except RemoteAPIError as exc:
-                console.print(f"\n  [error]❌ Failed to clear remote history: {exc}[/error]\n")
-        elif cmd == "/remove":
-            try:
-                result = session.undo_last_change()
-                message = result.get("result") or "Nothing to undo."
-                console.print(f"\n  [success]✅ {message}[/success]\n")
-            except RemoteAPIError as exc:
-                console.print(f"\n  [error]❌ Failed to undo remote change: {exc}[/error]\n")
-        elif cmd == "/history":
-            try:
-                print_history_table(session.get_history().get("actions", []))
-            except RemoteAPIError as exc:
-                console.print(f"\n  [error]❌ Failed to fetch remote history: {exc}[/error]\n")
-        elif cmd == "/queue":
-            console.print("\n  [dim]📭 Remote runtime does not keep a local pending queue.[/dim]\n")
-        elif cmd == "/stop":
-            console.print("\n  [dim]📭 Hosted stop is not available yet. Wait for the current remote turn to finish.[/dim]\n")
-        elif cmd == "/close":
-            handle_remote_exit(session, close=True)
-            break
-        elif cmd == "/config":
-            handle_remote_config(session, config)
-        elif cmd == "/agents":
-            handle_remote_agents(session, config, arg or None)
-        elif cmd == "/language":
-            handle_remote_language(session, config, arg or None)
-        elif cmd == "/thinking":
-            handle_remote_thinking(session, config)
-        elif cmd == "/version":
-            console.print(f"\n  [bold bright_cyan]⚡ {__app_name__}[/bold bright_cyan] [dim]v{__version__}[/dim]\n")
-        elif user_input.startswith("/"):
-            console.print(f"\n  [warning]⚠️  Unknown command: {user_input}[/warning]\n")
-        else:
-            process_remote_user_input(session, config, user_input)
+            parts = user_input.split(maxsplit=1)
+            cmd = parts[0].lower()
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            has_active_work = runner.is_busy() or runner.pending_count() > 0
+
+            if cmd in ("/exit", "/quit"):
+                approval_manager.cancel_pending()
+                if has_active_work:
+                    console.print("\n  [warning]Stopping the active hosted turn and clearing pending work...[/warning]\n")
+                    runner.shutdown(cancel_pending=True, stop_current=True)
+                handle_remote_exit(session)
+                break
+            if cmd == "/help":
+                handle_help()
+            elif cmd == "/queue":
+                render_remote_queue(runner)
+            elif cmd == "/stop":
+                handle_remote_stop(runner)
+            elif cmd == "/version":
+                console.print(f"\n  [bold bright_cyan]⚡ {__app_name__}[/bold bright_cyan] [dim]v{__version__}[/dim]\n")
+            elif approval_manager.pending_request() is not None:
+                if handle_remote_permission_input(approval_manager, user_input):
+                    continue
+            elif cmd in {"/approve", "/deny"}:
+                console.print("\n  [dim]No pending hosted permission request.[/dim]\n")
+            elif has_active_work and user_input.startswith("/") and cmd not in safe_busy_commands:
+                _render_busy_command_warning(cmd)
+            elif cmd == "/models":
+                handle_remote_models(session, config, arg or None)
+            elif cmd == "/sessions":
+                handle_remote_sessions(client)
+            elif cmd == "/clear":
+                try:
+                    session.clear_history()
+                    console.print("\n  [success]✅ Remote conversation history cleared.[/success]\n")
+                except RemoteAPIError as exc:
+                    console.print(f"\n  [error]❌ Failed to clear remote history: {exc}[/error]\n")
+            elif cmd == "/remove":
+                try:
+                    result = session.undo_last_change()
+                    message = result.get("result") or "Nothing to undo."
+                    console.print(f"\n  [success]✅ {message}[/success]\n")
+                except RemoteAPIError as exc:
+                    console.print(f"\n  [error]❌ Failed to undo remote change: {exc}[/error]\n")
+            elif cmd == "/history":
+                try:
+                    print_history_table(session.get_history().get("actions", []))
+                except RemoteAPIError as exc:
+                    console.print(f"\n  [error]❌ Failed to fetch remote history: {exc}[/error]\n")
+            elif cmd == "/close":
+                handle_remote_exit(session, close=True)
+                break
+            elif cmd == "/config":
+                handle_remote_config(session, config)
+            elif cmd == "/agents":
+                handle_remote_agents(session, config, arg or None)
+            elif cmd == "/language":
+                handle_remote_language(session, config, arg or None)
+            elif cmd == "/thinking":
+                handle_remote_thinking(session, config)
+            elif user_input.startswith("/"):
+                console.print(f"\n  [warning]⚠️  Unknown command: {user_input}[/warning]\n")
+            else:
+                queue_position = runner.submit(user_input)
+                if queue_position:
+                    console.print(
+                        f"\n  [dim]Queued hosted task #{queue_position}. It will run after the current turn.[/dim]\n"
+                    )
+    finally:
+        approval_manager.cancel_pending()
+        runner.shutdown(cancel_pending=False, stop_current=False)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1683,6 +2388,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--transport", choices=["auto", "sse", "websocket"], default=None, help="Remote streaming transport")
     run_parser.add_argument("--session-id", default=None, help="Resume an existing hosted session by ID")
     run_parser.add_argument("--auto-permission", action="store_true", help="Auto-approve destructive tools")
+    run_parser.add_argument(
+        "--command-policy",
+        choices=sorted(VALID_COMMAND_POLICIES),
+        default=None,
+        help="Local and hybrid run_command policy: auto, permissive, restricted, or disabled",
+    )
 
     serve_parser = subparsers.add_parser("serve", help="Run the hosted NeuDev API server")
     serve_parser.add_argument("--host", default="0.0.0.0", help="Bind host. Default 0.0.0.0")
@@ -1745,6 +2456,8 @@ def apply_run_overrides(config: NeuDevConfig, args: argparse.Namespace) -> NeuDe
         updates["remote_workspace"] = args.workspace
     if getattr(args, "auto_permission", False):
         updates["auto_permission"] = True
+    if getattr(args, "command_policy", None):
+        updates["command_policy"] = args.command_policy
     if updates:
         config.update(**updates)
     return config

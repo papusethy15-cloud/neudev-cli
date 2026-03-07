@@ -1,6 +1,7 @@
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -401,6 +402,55 @@ class RemoteAPITests(unittest.TestCase):
         self.assertIn("result", event_names)
         self.assertIn("done", event_names)
         self.assertEqual(final_payload["response"], "WebSocket answer")
+
+    def test_remote_stop_requests_cancel_active_hosted_turn(self):
+        client = self._client()
+        session = RemoteSessionClient.create(client, workspace=".", auto_permission=True)
+        hosted = self.service.sessions[session.session_id]
+        hosted.agent.llm.responses = [
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [{"name": "run_command", "arguments": {"command": "python --version"}}],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "This response should not be used.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
+        ]
+
+        run_command = hosted.agent.tool_registry.get("run_command")
+        started = threading.Event()
+        events = []
+
+        def long_running_execute(command, cwd=None, timeout=30, progress_callback=None, stop_event=None, **kwargs):
+            started.set()
+            while stop_event is not None and not stop_event.is_set():
+                time.sleep(0.01)
+            return f"Command stopped by user: {command}"
+
+        with patch.object(run_command, "execute", side_effect=long_running_execute):
+            worker = threading.Thread(
+                target=lambda: events.extend(list(session.stream_message("Run a slow command", transport="sse"))),
+                daemon=True,
+            )
+            worker.start()
+            self.assertTrue(started.wait(1))
+
+            stop_result = session.request_stop()
+
+            worker.join(timeout=3)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(stop_result["status"], "stop_requested")
+        final_payload = next(item["data"] for item in events if item["event"] == "result")
+        self.assertEqual(final_payload["status"], "ok")
+        self.assertEqual(final_payload["response"], "Stopped by user before completion.")
 
     def test_remote_sessions_persist_and_resume(self):
         client = self._client()
