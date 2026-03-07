@@ -47,7 +47,7 @@ class SessionManager:
         """Record an action."""
         self.actions.append(ActionRecord(action=action, target=target, details=details))
 
-    def backup_file(self, path: str) -> None:
+    def backup_file(self, path: str) -> FileBackup:
         """Backup a file's content before modification."""
         filepath = self._resolve_path(path)
         content = None
@@ -56,7 +56,9 @@ class SessionManager:
                 content = filepath.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 content = None
-        self.file_backups.append(FileBackup(path=str(filepath), original_content=content))
+        backup = FileBackup(path=str(filepath), original_content=content)
+        self.file_backups.append(backup)
+        return backup
 
     def track_test_file(self, path: str) -> None:
         """Track a test file for cleanup."""

@@ -1,9 +1,12 @@
 """Agent reasoning loop for NeuDev - the brain of the system."""
 
 from concurrent.futures import ThreadPoolExecutor
+import difflib
 import platform
 import re
+import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +94,24 @@ You have access to powerful tools for file system operations:
 
 
 CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+FILE_MUTATION_TOOLS = {
+    "write_file",
+    "edit_file",
+    "smart_edit_file",
+    "python_ast_edit",
+    "js_ts_symbol_edit",
+    "delete_file",
+}
+READ_ONLY_TOOLS = {
+    "read_file",
+    "read_files_batch",
+    "search_files",
+    "grep_search",
+    "symbol_search",
+    "list_directory",
+    "git_diff_review",
+    "file_outline",
+}
 
 
 @dataclass
@@ -154,6 +175,7 @@ class Agent:
         on_workspace_change=None,
         on_plan=None,
         on_plan_update=None,
+        stop_event=None,
     ) -> str:
         """Process a user message through the agent loop.
 
@@ -190,7 +212,6 @@ class Agent:
         tool_defs = self.tool_registry.get_tool_definitions()
         final_response = ""
         use_thinking = self.config.show_thinking
-        warned_about_tool_fallback = False
         orchestration = self._prepare_orchestration(
             working_conversation,
             tool_defs,
@@ -209,89 +230,45 @@ class Agent:
         if orchestration and on_phase:
             on_phase("executor", orchestration.team.executor)
 
-        for iteration in range(self.config.max_iterations):
-            try:
-                runtime_messages = self._build_runtime_messages(working_conversation, orchestration)
-                result = self.llm.chat_with_tools(
-                    messages=runtime_messages,
-                    tools=tool_defs,
-                    think=use_thinking,
-                    preferred_models=preferred_models,
-                    route_reason=route_reason,
-                )
-            except LLMError as e:
-                error_msg = f"LLM Error: {e}"
-                working_conversation.append({"role": "assistant", "content": error_msg})
-                self._persist_turn_state(working_conversation)
-                return error_msg
+        final_response, warned_about_tool_fallback, stopped = self._run_executor_loop(
+            working_conversation,
+            orchestration,
+            tool_defs,
+            preferred_models=preferred_models,
+            route_reason=route_reason,
+            use_thinking=use_thinking,
+            on_status=on_status,
+            on_text=on_text,
+            on_thinking=on_thinking,
+            on_plan_update=on_plan_update,
+            stop_event=stop_event,
+            warned_about_tool_fallback=False,
+            max_iterations=self.config.max_iterations,
+        )
 
-            if (
-                not result.get("native_tools_supported", True)
-                and not result["tool_calls"]
-                and not warned_about_tool_fallback
-            ):
-                warning = (
-                    "\n\n⚠️ **Note:** This model did not use tools in this reply. "
-                    "Switch to a stronger tool-calling model with `/models` if analysis stalls."
-                )
-                result["content"] = (result["content"] or "") + warning
-                warned_about_tool_fallback = True
+        if not stopped:
+            final_response = self._run_completion_guard(
+                working_conversation,
+                orchestration,
+                tool_defs,
+                final_response=final_response,
+                turn_action_start=turn_action_start,
+                preferred_models=preferred_models,
+                route_reason=route_reason,
+                use_thinking=use_thinking,
+                on_status=on_status,
+                on_text=on_text,
+                on_thinking=on_thinking,
+                on_plan_update=on_plan_update,
+                stop_event=stop_event,
+                warned_about_tool_fallback=warned_about_tool_fallback,
+            )
 
-            # If there's thinking content, send it to the callback
-            if result.get("thinking") and on_thinking and self._should_surface_thinking(result["thinking"]):
-                on_thinking(result["thinking"])
-
-            # Only surface the final user-facing reply, not intermediate tool-planning text.
-            if result["content"] and not result["tool_calls"]:
-                final_response = result["content"]
-                if on_text:
-                    on_text(result["content"])
-
-            # If no tool calls, we're done
-            if result["done"] or not result["tool_calls"]:
-                if final_response:
-                    working_conversation.append({"role": "assistant", "content": final_response})
-                break
-
-            # Process tool calls
-            # Add assistant message with tool calls to conversation
-            assistant_msg = {"role": "assistant", "content": ""}
-            if result["tool_calls"]:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": tc["arguments"],
-                        }
-                    }
-                    for tc in result["tool_calls"]
-                ]
-            working_conversation.append(assistant_msg)
-
-            for tool_call in result["tool_calls"]:
-                tool_name = tool_call["name"]
-                tool_args = tool_call["arguments"]
-
-                if on_status:
-                    on_status(tool_name, tool_args)
-
-                # Execute the tool
-                tool_result = self._execute_tool(tool_name, tool_args)
-                if self._advance_plan_progress_from_tool(tool_name, tool_result):
-                    self._emit_plan_update(on_plan_update)
-
-                # Add tool result to conversation
-                working_conversation.append({
-                    "role": "tool",
-                    "tool_name": tool_name,
-                    "content": tool_result,
-                })
-
-        else:
-            # Hit max iterations
-            final_response += "\n\n⚠️ Reached maximum iterations. The task may be incomplete."
-            working_conversation.append({"role": "assistant", "content": final_response})
+        if stopped or self._is_stop_requested(stop_event):
+            if not final_response:
+                final_response = "Stopped by user before completion."
+            self._persist_turn_state(working_conversation)
+            return final_response
 
         review_notes = self._run_reviewer(
             user_message=user_message,
@@ -318,9 +295,15 @@ class Agent:
         self._persist_turn_state(working_conversation)
         return final_response
 
-    def _execute_tool(self, name: str, args: dict) -> str:
+    def _execute_tool(self, name: str, args: dict, event_callback=None, stop_event=None) -> str:
         """Execute a tool with permission checking and session tracking."""
-        return self._execute_tool_internal(name, args, allow_fallback=True)
+        return self._execute_tool_internal(
+            name,
+            args,
+            allow_fallback=True,
+            event_callback=event_callback,
+            stop_event=stop_event,
+        )
 
     def _execute_tool_internal(
         self,
@@ -330,12 +313,16 @@ class Agent:
         allow_fallback: bool,
         skip_permission: bool = False,
         skip_backup: bool = False,
+        event_callback=None,
+        stop_event=None,
     ) -> str:
         """Execute a tool, optionally allowing related-tool fallback."""
         tool = self.tool_registry.get(name)
         if tool is None:
             return f"Error: Unknown tool '{name}'"
 
+        started_wall = datetime.now().strftime("%I:%M:%S %p")
+        started_mono = time.monotonic()
         resolved_path = None
         raw_path = args.get("path")
         if raw_path:
@@ -349,31 +336,105 @@ class Agent:
         if tool.requires_permission and not skip_permission:
             message = tool.permission_message(args)
             if not self.permissions.request_permission(name, message):
-                return f"Action denied by user: {name}"
+                denied = f"Action denied by user: {name}"
+                if event_callback:
+                    event_callback(
+                        name,
+                        self._build_tool_result_event(
+                            name,
+                            args,
+                            denied,
+                            resolved_path=resolved_path,
+                            backup=None,
+                            elapsed=time.monotonic() - started_mono,
+                            started_at=started_wall,
+                            success=False,
+                        ),
+                    )
+                return denied
 
         # Backup file before modification
-        if not skip_backup and name in ("write_file", "edit_file", "smart_edit_file", "python_ast_edit", "js_ts_symbol_edit", "delete_file"):
+        if self._is_stop_requested(stop_event):
+            stopped_result = f"Stopped by user before executing tool: {name}"
+            if event_callback:
+                event_callback(
+                    name,
+                    self._build_tool_result_event(
+                        name,
+                        args,
+                        stopped_result,
+                        resolved_path=resolved_path,
+                        backup=None,
+                        elapsed=time.monotonic() - started_mono,
+                        started_at=started_wall,
+                        success=False,
+                    ),
+                )
+            return stopped_result
+
+        backup = None
+        if not skip_backup and name in FILE_MUTATION_TOOLS:
             if resolved_path:
-                self.session.backup_file(resolved_path)
+                backup = self.session.backup_file(resolved_path)
             elif raw_path:
-                self.session.backup_file(raw_path)
+                backup = self.session.backup_file(raw_path)
+
+        if event_callback:
+            event_callback(name, self._build_tool_start_event(name, args, resolved_path, started_wall))
 
         # Execute
+        execute_args = dict(args)
+        if name == "run_command":
+            if event_callback:
+                execute_args["progress_callback"] = lambda payload: event_callback(name, payload)
+            execute_args["stop_event"] = stop_event
         try:
-            result = tool.execute(**args)
+            result = tool.execute(**execute_args)
         except ToolError as e:
             if allow_fallback:
                 fallback_result = self._attempt_tool_fallback(
                     name,
                     args,
                     error=e,
-                    backup_taken=not skip_backup and name in ("write_file", "edit_file", "smart_edit_file", "python_ast_edit", "js_ts_symbol_edit", "delete_file"),
+                    backup_taken=not skip_backup and name in FILE_MUTATION_TOOLS,
+                    event_callback=event_callback,
+                    stop_event=stop_event,
                 )
                 if fallback_result is not None:
                     return fallback_result
-            return f"Tool Error ({name}): {e}"
+            error_result = f"Tool Error ({name}): {e}"
+            if event_callback:
+                event_callback(
+                    name,
+                    self._build_tool_result_event(
+                        name,
+                        args,
+                        error_result,
+                        resolved_path=resolved_path,
+                        backup=backup,
+                        elapsed=time.monotonic() - started_mono,
+                        started_at=started_wall,
+                        success=False,
+                    ),
+                )
+            return error_result
         except Exception as e:
-            return f"Unexpected Error ({name}): {type(e).__name__}: {e}"
+            error_result = f"Unexpected Error ({name}): {type(e).__name__}: {e}"
+            if event_callback:
+                event_callback(
+                    name,
+                    self._build_tool_result_event(
+                        name,
+                        args,
+                        error_result,
+                        resolved_path=resolved_path,
+                        backup=backup,
+                        elapsed=time.monotonic() - started_mono,
+                        started_at=started_wall,
+                        success=False,
+                    ),
+                )
+            return error_result
 
         # Track the action
         action_map = {
@@ -393,7 +454,17 @@ class Agent:
         }
         action_type = action_map.get(name, "other")
         target = resolved_path or args.get("command") or args.get("directory") or ",".join(raw_paths) or name
-        self.session.record_action(action_type, str(target))
+        event_payload = self._build_tool_result_event(
+            name,
+            args,
+            result,
+            resolved_path=resolved_path,
+            backup=backup,
+            elapsed=time.monotonic() - started_mono,
+            started_at=started_wall,
+            success=not self._tool_result_failed(result),
+        )
+        self.session.record_action(action_type, str(target), details=event_payload.get("summary", ""))
 
         # Track file access
         if resolved_path:
@@ -406,9 +477,19 @@ class Agent:
             if "test_" in resolved_path or "_test." in resolved_path:
                 self.session.track_test_file(resolved_path)
 
+        if event_callback:
+            event_callback(name, event_payload)
         return result
 
-    def _attempt_tool_fallback(self, name: str, args: dict, error: Exception, backup_taken: bool) -> str | None:
+    def _attempt_tool_fallback(
+        self,
+        name: str,
+        args: dict,
+        error: Exception,
+        backup_taken: bool,
+        event_callback=None,
+        stop_event=None,
+    ) -> str | None:
         """Try a related tool automatically after a primary tool fails."""
         message = str(error).lower()
         path = args.get("path")
@@ -419,6 +500,8 @@ class Agent:
                     "list_directory",
                     {"path": path, "max_depth": 2},
                     allow_fallback=False,
+                    event_callback=event_callback,
+                    stop_event=stop_event,
                 )
                 return (
                     f"Automatic fallback: `read_file` received a directory, so `list_directory` was used instead.\n\n"
@@ -432,6 +515,8 @@ class Agent:
                     "search_files",
                     {"pattern": f"*{pattern}*", "directory": directory, "file_type": "any"},
                     allow_fallback=False,
+                    event_callback=event_callback,
+                    stop_event=stop_event,
                 )
                 return (
                     f"Automatic fallback: `read_file` could not find the path, so `search_files` looked for related names.\n\n"
@@ -443,6 +528,8 @@ class Agent:
                 "read_file",
                 {"path": path, "start_line": 1, "end_line": 200},
                 allow_fallback=False,
+                event_callback=event_callback,
+                stop_event=stop_event,
             )
             return (
                 f"Automatic fallback: `list_directory` received a file path, so `read_file` was used instead.\n\n"
@@ -456,6 +543,8 @@ class Agent:
                 allow_fallback=False,
                 skip_permission=True,
                 skip_backup=backup_taken,
+                event_callback=event_callback,
+                stop_event=stop_event,
             )
             return (
                 "Automatic fallback: exact `edit_file` matching failed, so `smart_edit_file` retried with normalized matching.\n\n"
@@ -463,6 +552,369 @@ class Agent:
             )
 
         return None
+
+    def _run_executor_loop(
+        self,
+        working_conversation: list[dict],
+        orchestration: OrchestrationContext | None,
+        tool_defs: list[dict],
+        *,
+        preferred_models: list[str] | None,
+        route_reason: str | None,
+        use_thinking: bool,
+        on_status=None,
+        on_text=None,
+        on_thinking=None,
+        on_plan_update=None,
+        stop_event=None,
+        warned_about_tool_fallback: bool,
+        max_iterations: int,
+    ) -> tuple[str, bool, bool]:
+        """Run the main LLM/tool loop and return the response, warning state, and stop flag."""
+        final_response = ""
+        stopped = False
+
+        for _ in range(max_iterations):
+            if self._is_stop_requested(stop_event):
+                stopped = True
+                break
+
+            try:
+                runtime_messages = self._build_runtime_messages(working_conversation, orchestration)
+                result = self.llm.chat_with_tools(
+                    messages=runtime_messages,
+                    tools=tool_defs,
+                    think=use_thinking,
+                    preferred_models=preferred_models,
+                    route_reason=route_reason,
+                )
+            except LLMError as exc:
+                error_msg = f"LLM Error: {exc}"
+                working_conversation.append({"role": "assistant", "content": error_msg})
+                return error_msg, warned_about_tool_fallback, True
+
+            if (
+                not result.get("native_tools_supported", True)
+                and not result.get("tool_calls")
+                and not warned_about_tool_fallback
+            ):
+                warning = (
+                    "\n\n⚠️ **Note:** This model did not use tools in this reply. "
+                    "Switch to a stronger tool-calling model with `/models` if analysis stalls."
+                )
+                result["content"] = (result.get("content") or "") + warning
+                warned_about_tool_fallback = True
+
+            if result.get("thinking") and on_thinking and self._should_surface_thinking(result["thinking"]):
+                on_thinking(result["thinking"])
+
+            if result.get("content") and not result.get("tool_calls"):
+                final_response = result["content"]
+                if on_text:
+                    on_text(result["content"])
+
+            if result.get("done") or not result.get("tool_calls"):
+                if final_response:
+                    working_conversation.append({"role": "assistant", "content": final_response})
+                break
+
+            assistant_msg = {"role": "assistant", "content": ""}
+            tool_calls = result.get("tool_calls") or []
+            if tool_calls:
+                assistant_msg["tool_calls"] = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool_call["name"],
+                            "arguments": tool_call["arguments"],
+                        },
+                    }
+                    for tool_call in tool_calls
+                ]
+            working_conversation.append(assistant_msg)
+
+            for tool_call in tool_calls:
+                if self._is_stop_requested(stop_event):
+                    stopped = True
+                    break
+
+                tool_name = tool_call["name"]
+                tool_args = tool_call["arguments"]
+                tool_result = self._execute_tool(
+                    tool_name,
+                    tool_args,
+                    event_callback=on_status,
+                    stop_event=stop_event,
+                )
+                if self._advance_plan_progress_from_tool(tool_name, tool_result):
+                    self._emit_plan_update(on_plan_update)
+                working_conversation.append(
+                    {
+                        "role": "tool",
+                        "tool_name": tool_name,
+                        "content": tool_result,
+                    }
+                )
+                if self._is_stop_requested(stop_event):
+                    stopped = True
+                    break
+
+            if stopped:
+                break
+        else:
+            final_response += "\n\n⚠️ Reached maximum iterations. The task may be incomplete."
+            working_conversation.append({"role": "assistant", "content": final_response})
+
+        if stopped and not final_response:
+            final_response = "Stopped by user before completion."
+        return final_response, warned_about_tool_fallback, stopped
+
+    def _run_completion_guard(
+        self,
+        working_conversation: list[dict],
+        orchestration: OrchestrationContext | None,
+        tool_defs: list[dict],
+        *,
+        final_response: str,
+        turn_action_start: int,
+        preferred_models: list[str] | None,
+        route_reason: str | None,
+        use_thinking: bool,
+        on_status=None,
+        on_text=None,
+        on_thinking=None,
+        on_plan_update=None,
+        stop_event=None,
+        warned_about_tool_fallback: bool,
+    ) -> str:
+        """Run a bounded verification/remediation pass before the final review."""
+        if self._is_stop_requested(stop_event):
+            return final_response
+
+        turn_actions = self.session.actions[turn_action_start:]
+        had_turn_actions = bool(turn_actions)
+        mutated_workspace = any(action.action in {"created", "modified", "deleted"} for action in turn_actions)
+        diagnostics_result = ""
+
+        if mutated_workspace and self._should_run_completion_diagnostics(turn_actions):
+            diagnostics_result = self._execute_tool(
+                "changed_files_diagnostics",
+                {},
+                event_callback=on_status,
+                stop_event=stop_event,
+            )
+            working_conversation.append(
+                {
+                    "role": "tool",
+                    "tool_name": "changed_files_diagnostics",
+                    "content": diagnostics_result,
+                }
+            )
+            if self._advance_plan_progress_from_tool("changed_files_diagnostics", diagnostics_result):
+                self._emit_plan_update(on_plan_update)
+
+        incomplete_items = [
+            item["text"]
+            for item in self.last_plan_progress
+            if item.get("status") in {"pending", "in_progress"}
+        ]
+        diagnostics_failed = bool(diagnostics_result) and self._tool_result_failed(diagnostics_result)
+        needs_retry = diagnostics_failed or (had_turn_actions and bool(incomplete_items))
+        if not needs_retry:
+            return final_response
+
+        if self._is_stop_requested(stop_event):
+            return final_response
+
+        guard_lines = [
+            "Internal completion guard: do not summarize yet.",
+        ]
+        if diagnostics_failed:
+            guard_lines.append(
+                "Changed-file diagnostics reported an error. Fix the underlying issue before the final answer."
+            )
+            guard_lines.append(diagnostics_result[:1500])
+        if incomplete_items:
+            guard_lines.append("Remaining todo items:")
+            guard_lines.extend(f"- {item}" for item in incomplete_items[:6])
+        if final_response:
+            guard_lines.append("Previous draft response:")
+            guard_lines.append(final_response[:1500])
+
+        working_conversation.append({"role": "system", "content": "\n".join(guard_lines)})
+        retry_response, _, stopped = self._run_executor_loop(
+            working_conversation,
+            orchestration,
+            tool_defs,
+            preferred_models=preferred_models,
+            route_reason=route_reason,
+            use_thinking=use_thinking,
+            on_status=on_status,
+            on_text=on_text,
+            on_thinking=on_thinking,
+            on_plan_update=on_plan_update,
+            stop_event=stop_event,
+            warned_about_tool_fallback=warned_about_tool_fallback,
+            max_iterations=min(4, max(1, self.config.max_iterations)),
+        )
+        if stopped and not retry_response:
+            return final_response or "Stopped by user before completion."
+        return retry_response or final_response
+
+    @staticmethod
+    def _should_run_completion_diagnostics(turn_actions) -> bool:
+        """Limit automatic diagnostics to code and build/config file edits."""
+        code_suffixes = {
+            ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".hpp",
+            ".html", ".java", ".js", ".json", ".jsx", ".mjs", ".php",
+            ".ps1", ".py", ".rb", ".rs", ".scss", ".sh", ".sql", ".toml",
+            ".ts", ".tsx", ".vue", ".yaml", ".yml",
+        }
+        special_files = {
+            "dockerfile",
+            "makefile",
+            "package.json",
+            "package-lock.json",
+            "pnpm-lock.yaml",
+            "pyproject.toml",
+            "requirements.txt",
+            "setup.py",
+            "tsconfig.json",
+        }
+        for action in turn_actions:
+            if getattr(action, "action", "") not in {"created", "modified", "deleted"}:
+                continue
+            target = Path(str(getattr(action, "target", "") or ""))
+            if target.suffix.lower() in code_suffixes:
+                return True
+            if target.name.lower() in special_files:
+                return True
+        return False
+
+    @staticmethod
+    def _is_stop_requested(stop_event) -> bool:
+        """Return True when a caller requested cancellation."""
+        return bool(stop_event is not None and stop_event.is_set())
+
+    def _build_tool_start_event(
+        self,
+        name: str,
+        args: dict,
+        resolved_path: str | None,
+        started_at: str,
+    ) -> dict:
+        """Build a compact tool-start event for the CLI."""
+        return {
+            "event": "start",
+            "tool": name,
+            "target": self._tool_target(name, args, resolved_path),
+            "started_at": started_at,
+            "path": args.get("path", ""),
+            "command": args.get("command", ""),
+            "directory": args.get("directory", ""),
+        }
+
+    def _build_tool_result_event(
+        self,
+        name: str,
+        args: dict,
+        result: str,
+        *,
+        resolved_path: str | None,
+        backup,
+        elapsed: float,
+        started_at: str,
+        success: bool,
+    ) -> dict:
+        """Build a compact tool-result event for the CLI and session history."""
+        target = self._tool_target(name, args, resolved_path)
+        lines_added = 0
+        lines_deleted = 0
+        if name in FILE_MUTATION_TOOLS:
+            lines_added, lines_deleted = self._line_change_counts(resolved_path, backup)
+
+        preview = self._result_preview(result)
+        parts = [target] if target else []
+        if name in FILE_MUTATION_TOOLS and (lines_added or lines_deleted):
+            parts.append(f"+{lines_added}/-{lines_deleted} lines")
+        elif preview and name not in FILE_MUTATION_TOOLS:
+            parts.append(preview)
+        parts.append(f"{elapsed:.1f}s")
+
+        if name == "run_command":
+            action = "command"
+        elif name in READ_ONLY_TOOLS:
+            action = "read"
+        elif name == "delete_file":
+            action = "delete"
+        else:
+            action = "write"
+
+        return {
+            "event": "result",
+            "tool": name,
+            "target": target,
+            "started_at": started_at,
+            "elapsed": round(elapsed, 1),
+            "success": success,
+            "action": action,
+            "lines_added": lines_added,
+            "lines_deleted": lines_deleted,
+            "result_preview": preview,
+            "summary": " | ".join(part for part in parts if part),
+            "path": args.get("path", ""),
+            "command": args.get("command", ""),
+            "directory": args.get("directory", ""),
+        }
+
+    @staticmethod
+    def _tool_target(name: str, args: dict, resolved_path: str | None) -> str:
+        """Choose the most useful target label for a tool event."""
+        if name == "run_command":
+            return str(args.get("command", "")).strip()
+        if resolved_path:
+            return str(resolved_path)
+        if args.get("path"):
+            return str(args.get("path"))
+        if args.get("paths"):
+            return ", ".join(str(item) for item in (args.get("paths") or [])[:3])
+        return str(args.get("directory") or args.get("pattern") or "")
+
+    def _line_change_counts(self, resolved_path: str | None, backup) -> tuple[int, int]:
+        """Return added/deleted line counts for a changed text file."""
+        before = getattr(backup, "original_content", None)
+        after = None
+        if resolved_path:
+            candidate = Path(resolved_path)
+            if candidate.exists():
+                try:
+                    after = candidate.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    after = None
+        return self._count_line_diff(before, after)
+
+    @staticmethod
+    def _count_line_diff(before: str | None, after: str | None) -> tuple[int, int]:
+        """Count approximate added/deleted lines between two text snapshots."""
+        before_lines = [] if before is None else before.splitlines()
+        after_lines = [] if after is None else after.splitlines()
+        matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines)
+        added = 0
+        deleted = 0
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag in {"replace", "delete"}:
+                deleted += i2 - i1
+            if tag in {"replace", "insert"}:
+                added += j2 - j1
+        return added, deleted
+
+    @staticmethod
+    def _result_preview(result: str, limit: int = 100) -> str:
+        """Extract a compact first-line preview from a tool result."""
+        first_line = (result or "").strip().splitlines()[0] if result else ""
+        if len(first_line) > limit:
+            return first_line[:limit].rstrip() + "..."
+        return first_line
 
     def _check_for_suggestions(self) -> str:
         """Check for improvement suggestions after actions."""

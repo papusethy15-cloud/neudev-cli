@@ -1,4 +1,5 @@
 import subprocess
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -61,6 +62,25 @@ class ToolSmartnessTests(unittest.TestCase):
         self.assertIn("Automatic fallback", result)
         self.assertIn("smart_edit_file", result)
         self.assertIn("great", self.example_path.read_text(encoding="utf-8"))
+
+    @patch("neudev.agent.OllamaClient", DummyOllamaClient)
+    def test_agent_passes_stop_event_into_run_command(self):
+        agent = Agent(self.config, str(FIXTURE_ROOT))
+        agent.permissions.auto_approve = True
+        stop_event = threading.Event()
+        received = {}
+
+        tool = agent.tool_registry.get("run_command")
+
+        def fake_execute(**kwargs):
+            received["stop_event"] = kwargs.get("stop_event")
+            return "ok"
+
+        with patch.object(tool, "execute", side_effect=fake_execute):
+            result = agent._execute_tool("run_command", {"command": "python --version"}, stop_event=stop_event)
+
+        self.assertEqual(result, "ok")
+        self.assertIs(received["stop_event"], stop_event)
 
     def test_search_files_uses_fuzzy_name_fallback(self):
         tool = SearchFilesTool()
@@ -132,6 +152,69 @@ class ToolSmartnessTests(unittest.TestCase):
             tool.execute("python -c \"print('nope')\"")
 
         self.assertIn("inline execution flags", str(cm.exception))
+
+    def test_run_command_emits_background_wait_progress_for_long_commands(self):
+        tool = RunCommandTool()
+        tool.bind_workspace(FIXTURE_ROOT)
+        events = []
+
+        class FakeProcess:
+            def __init__(self):
+                self.returncode = 0
+                self.calls = 0
+
+            def communicate(self, timeout=None):
+                self.calls += 1
+                if self.calls < 3:
+                    raise subprocess.TimeoutExpired("python --version", timeout)
+                return ("Python 3.14.0", "")
+
+            def kill(self):
+                self.returncode = 1
+
+        monotonic_values = [0.0, 0.0, 2.5, 7.8, 8.0]
+        with patch("subprocess.Popen", return_value=FakeProcess()), patch(
+            "time.monotonic", side_effect=monotonic_values
+        ):
+            result = tool.execute("python --version", progress_callback=events.append)
+
+        self.assertIn("Python 3.14.0", result)
+        self.assertGreaterEqual(len(events), 2)
+        self.assertEqual(events[0]["event"], "progress")
+        self.assertEqual(events[0]["mode"], "background_wait")
+        self.assertEqual(events[0]["command"], "python --version")
+
+    def test_run_command_honors_stop_requests(self):
+        tool = RunCommandTool()
+        tool.bind_workspace(FIXTURE_ROOT)
+        stop_event = threading.Event()
+        events = []
+
+        class FakeProcess:
+            def __init__(self):
+                self.returncode = 0
+                self.calls = 0
+                self.killed = False
+
+            def communicate(self, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    stop_event.set()
+                    raise subprocess.TimeoutExpired("python --version", timeout)
+                return ("", "")
+
+            def kill(self):
+                self.killed = True
+                self.returncode = 1
+
+        process = FakeProcess()
+        with patch("subprocess.Popen", return_value=process), patch("time.monotonic", side_effect=[0.0, 0.0, 0.5]):
+            with self.assertRaises(Exception) as cm:
+                tool.execute("python --version", progress_callback=events.append, stop_event=stop_event)
+
+        self.assertTrue(process.killed)
+        self.assertIn("Command stopped by user", str(cm.exception))
+        self.assertEqual(events[-1]["mode"], "stop_requested")
 
     def test_read_files_batch_reads_multiple_related_files(self):
         tool = ReadFilesBatchTool()

@@ -1,10 +1,12 @@
+import threading
+import time
 import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-from neudev.cli import build_parser, run_login_setup, run_logout, run_uninstall
+from neudev.cli import QueuedLocalTaskRunner, build_parser, run_login_setup, run_logout, run_uninstall
 from neudev.config import NeuDevConfig
 
 
@@ -94,6 +96,58 @@ class CLITests(unittest.TestCase):
         self.assertEqual(auth_args.auth_command, "login")
         self.assertEqual(uninstall_args.command, "uninstall")
         self.assertTrue(uninstall_args.purge_config)
+
+    def test_local_task_runner_queues_follow_up_messages(self):
+        started = threading.Event()
+        release = threading.Event()
+        processed = []
+
+        def fake_processor(agent, message, *, stop_event=None):
+            processed.append(("start", message))
+            if message == "first":
+                started.set()
+                release.wait(1)
+            processed.append(("done", message, bool(stop_event and stop_event.is_set())))
+
+        with patch("neudev.cli.console.print"):
+            runner = QueuedLocalTaskRunner(object(), processor=fake_processor)
+            try:
+                self.assertEqual(runner.submit("first"), 0)
+                self.assertTrue(started.wait(1))
+                self.assertEqual(runner.submit("second"), 1)
+                active, pending = runner.snapshot()
+                self.assertEqual(active, "first")
+                self.assertEqual(pending, ["second"])
+                release.set()
+                self.assertTrue(runner.wait_until_idle(timeout=1))
+            finally:
+                runner.shutdown(cancel_pending=True, stop_current=True)
+
+        self.assertEqual(
+            [item[1] for item in processed if item[0] == "start"],
+            ["first", "second"],
+        )
+
+    def test_local_task_runner_stop_requests_cancel_on_active_task(self):
+        started = threading.Event()
+        stopped = threading.Event()
+
+        def fake_processor(agent, message, *, stop_event=None):
+            started.set()
+            while stop_event is not None and not stop_event.is_set():
+                time.sleep(0.01)
+            stopped.set()
+
+        with patch("neudev.cli.console.print"):
+            runner = QueuedLocalTaskRunner(object(), processor=fake_processor)
+            try:
+                runner.submit("long running task")
+                self.assertTrue(started.wait(1))
+                self.assertTrue(runner.request_stop())
+                self.assertTrue(stopped.wait(1))
+                self.assertTrue(runner.wait_until_idle(timeout=1))
+            finally:
+                runner.shutdown(cancel_pending=True, stop_current=True)
 
 
 if __name__ == "__main__":

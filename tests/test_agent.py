@@ -101,6 +101,9 @@ class AgentTests(unittest.TestCase):
     def tearDown(self):
         self.readme_path.write_text(self.original_readme, encoding="utf-8")
         self.example_path.write_text(self.original_example, encoding="utf-8")
+        notes_path = self.workspace / "notes.txt"
+        if notes_path.exists():
+            notes_path.unlink()
 
     @patch("neudev.agent.OllamaClient", FakeOllamaClient)
     def test_tool_loop_hides_intermediate_planning_text(self):
@@ -494,6 +497,86 @@ class AgentTests(unittest.TestCase):
         ]
         self.assertEqual(len(hidden_notes), 1)
         self.assertIn("README.md", hidden_notes[0])
+
+    @patch("neudev.agent.OllamaClient", FakeOllamaClient)
+    def test_tool_status_events_include_file_line_counts(self):
+        config = NeuDevConfig(
+            model="auto",
+            response_language="English",
+            agent_mode="single",
+            show_thinking=False,
+        )
+        agent = Agent(config, str(self.workspace))
+        agent.permissions.auto_approve = True
+        agent.llm.responses = [
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [
+                    {
+                        "name": "write_file",
+                        "arguments": {
+                            "path": "notes.txt",
+                            "content": "line 1\nline 2\n",
+                        },
+                    }
+                ],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "Created the note.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
+        ]
+
+        events = []
+        response = agent.process_message("Create a note", on_status=lambda name, payload: events.append((name, dict(payload))))
+
+        self.assertIn("Created the note.", response)
+        result_event = next(
+            payload for name, payload in events if name == "write_file" and payload.get("event") == "result"
+        )
+        self.assertEqual(result_event["lines_added"], 2)
+        self.assertEqual(result_event["lines_deleted"], 0)
+        self.assertTrue(result_event["success"])
+
+    @patch("neudev.agent.OllamaClient", FakeOllamaClient)
+    def test_process_message_passes_stop_event_into_tool_execution(self):
+        agent = Agent(self.config, str(self.workspace))
+        agent.permissions.auto_approve = True
+        stop_event = threading.Event()
+        received = {}
+        tool = agent.tool_registry.get("run_command")
+        agent.llm.responses = [
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [{"name": "run_command", "arguments": {"command": "python --version"}}],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "Done.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
+        ]
+
+        def fake_execute(**kwargs):
+            received["stop_event"] = kwargs.get("stop_event")
+            return "ok"
+
+        with patch.object(tool, "execute", side_effect=fake_execute):
+            response = agent.process_message("Run a command", stop_event=stop_event)
+
+        self.assertEqual(response, "Done.")
+        self.assertIs(received["stop_event"], stop_event)
 
     @patch("neudev.agent.OllamaClient", FakeOllamaClient)
     def test_system_prompt_describes_fullstack_backend_and_frontend_components(self):

@@ -1,9 +1,11 @@
 """Run shell command tool for NeuDev."""
 
+from datetime import datetime
 import os
 from pathlib import Path
 import shlex
 import subprocess
+import time
 
 from neudev.tools.base import BaseTool, ToolError
 
@@ -46,6 +48,8 @@ RESTRICTED_ALLOWED_COMMANDS = {
     "yarn",
 }
 SHELL_CONTROL_TOKENS = ("&&", "||", ";", "|", ">", "<", "`", "$(", "\n", "\r")
+BACKGROUND_WAIT_THRESHOLD_SECONDS = 2.0
+BACKGROUND_WAIT_UPDATE_SECONDS = 5.0
 DISALLOWED_INLINE_FLAGS = {
     "bash": {"-c"},
     "cmd": {"/c", "/k"},
@@ -57,6 +61,10 @@ DISALLOWED_INLINE_FLAGS = {
     "python3": {"-c"},
     "sh": {"-c"},
 }
+
+
+class CommandStopped(Exception):
+    """Raised when a user requests cancellation of a running command."""
 
 
 class RunCommandTool(BaseTool):
@@ -120,7 +128,15 @@ class RunCommandTool(BaseTool):
         cwd = args.get("cwd", ".")
         return f"Run command: {cmd}\n  Directory: {cwd}"
 
-    def execute(self, command: str, cwd: str = None, timeout: int = 30, **kwargs) -> str:
+    def execute(
+        self,
+        command: str,
+        cwd: str = None,
+        timeout: int = 30,
+        progress_callback=None,
+        stop_event=None,
+        **kwargs,
+    ) -> str:
         # Safety check
         cmd_lower = command.lower().strip()
         for blocked in BLOCKED_COMMANDS:
@@ -142,8 +158,19 @@ class RunCommandTool(BaseTool):
             run_target = self._validate_restricted_command(command)
             use_shell = False
 
+        started_wall = datetime.now().strftime("%I:%M:%S %p")
+        started_mono = time.monotonic()
         try:
-            result = self._run_subprocess(run_target, work_dir, timeout, shell=use_shell)
+            result = self._run_subprocess(
+                run_target,
+                work_dir,
+                timeout,
+                shell=use_shell,
+                display_command=command,
+                progress_callback=progress_callback,
+                started_at=started_wall,
+                stop_event=stop_event,
+            )
             if result.returncode != 0:
                 fallback_command = self._get_fallback_command(command, work_dir, result)
                 if fallback_command:
@@ -152,18 +179,33 @@ class RunCommandTool(BaseTool):
                     if self.execution_mode == "restricted":
                         fallback_target = self._validate_restricted_command(fallback_command)
                         fallback_shell = False
-                    fallback_result = self._run_subprocess(fallback_target, work_dir, timeout, shell=fallback_shell)
+                    fallback_result = self._run_subprocess(
+                        fallback_target,
+                        work_dir,
+                        timeout,
+                        shell=fallback_shell,
+                        display_command=fallback_command,
+                        progress_callback=progress_callback,
+                        started_at=started_wall,
+                        stop_event=stop_event,
+                    )
                     if fallback_result.returncode == 0:
+                        duration = time.monotonic() - started_mono
                         output = self._format_output(fallback_result)
                         return (
                             f"Command: {command}\n"
+                            f"Started: {started_wall}\n"
+                            f"Duration: {duration:.1f}s\n"
                             f"Status: ❌ Failed (auto-fallback used)\n\n"
                             f"Automatic fallback command: {fallback_command}\n\n{output}"
                         )
+            duration = time.monotonic() - started_mono
             output = self._format_output(result)
             status = "✅ Success" if result.returncode == 0 else f"❌ Failed (exit code {result.returncode})"
-            return f"Command: {command}\nStatus: {status}\n\n{output}"
+            return f"Command: {command}\nStarted: {started_wall}\nDuration: {duration:.1f}s\nStatus: {status}\n\n{output}"
 
+        except CommandStopped:
+            raise ToolError(f"Command stopped by user: {command}")
         except subprocess.TimeoutExpired:
             raise ToolError(
                 f"Command timed out after {timeout}s: {command}\n"
@@ -178,16 +220,86 @@ class RunCommandTool(BaseTool):
             raise ToolError(f"Command execution failed: {type(e).__name__}: {e}")
 
     @staticmethod
-    def _run_subprocess(command: str | list[str], work_dir: Path, timeout: int, *, shell: bool):
-        return subprocess.run(
+    def _run_subprocess(
+        command: str | list[str],
+        work_dir: Path,
+        timeout: int,
+        *,
+        shell: bool,
+        display_command: str,
+        progress_callback=None,
+        started_at: str = "",
+        stop_event=None,
+    ):
+        if stop_event is not None and stop_event.is_set():
+            raise CommandStopped(display_command)
+        if progress_callback is None:
+            return subprocess.run(
+                command,
+                shell=shell,
+                cwd=str(work_dir),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=None,
+            )
+
+        process = subprocess.Popen(
             command,
             shell=shell,
             cwd=str(work_dir),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             env=None,
         )
+        started_mono = time.monotonic()
+        wait_announced = False
+        last_update = 0.0
+
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=process.returncode,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+            except subprocess.TimeoutExpired:
+                elapsed = time.monotonic() - started_mono
+                if stop_event is not None and stop_event.is_set():
+                    if progress_callback is not None:
+                        progress_callback(
+                            {
+                                "event": "progress",
+                                "command": display_command,
+                                "started_at": started_at,
+                                "elapsed": round(elapsed, 1),
+                                "mode": "stop_requested",
+                            }
+                        )
+                    process.kill()
+                    process.communicate()
+                    raise CommandStopped(display_command)
+                if elapsed >= timeout:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                    raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+                if elapsed < BACKGROUND_WAIT_THRESHOLD_SECONDS:
+                    continue
+                if (not wait_announced) or (elapsed - last_update >= BACKGROUND_WAIT_UPDATE_SECONDS):
+                    wait_announced = True
+                    last_update = elapsed
+                    progress_callback(
+                        {
+                            "event": "progress",
+                            "command": display_command,
+                            "started_at": started_at,
+                            "elapsed": round(elapsed, 1),
+                            "mode": "background_wait",
+                        }
+                    )
 
     @staticmethod
     def _format_output(result) -> str:
