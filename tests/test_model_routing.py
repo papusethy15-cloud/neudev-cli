@@ -228,6 +228,34 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertEqual(result["model"], "qwen2.5-coder:7b")
         self.assertEqual(calls[0][0], "qwen2.5-coder:7b")
 
+    def test_chat_with_tools_extracts_bare_json_tool_call_text(self):
+        client = RoutingClient(NeuDevConfig(model="auto"))
+        client._fetch_installed_models = lambda: MODELS
+
+        def fake_chat(messages, tools=None, stream=False, think=False, model_name=None):
+            return {
+                "message": {
+                    "content": '{"name": "write_file", "arguments": {"path": "index.html", "content": "<!doctype html>"}}',
+                    "thinking": "",
+                    "tool_calls": [],
+                }
+            }
+
+        client.chat = fake_chat
+        result = client.chat_with_tools(
+            [{"role": "user", "content": "Create a single page portfolio website"}],
+            tools=[{"function": {"name": "write_file"}}],
+            think=True,
+        )
+
+        self.assertEqual(result["tool_call_mode"], "text")
+        self.assertFalse(result["done"])
+        self.assertEqual(
+            result["tool_calls"],
+            [{"name": "write_file", "arguments": {"path": "index.html", "content": "<!doctype html>"}}],
+        )
+        self.assertEqual(result["content"], "")
+
     def test_chat_with_tools_falls_back_when_first_model_times_out(self):
         client = RoutingClient(NeuDevConfig(model="auto"))
         client._resolve_candidate_models = lambda messages, tools, preferred_models=None, route_reason=None: (

@@ -34,6 +34,16 @@ README.md
         )
         self.assertEqual(cleaned, "")
 
+    def test_extracts_inline_json_tool_call(self):
+        text = """{"name": "write_file", "arguments": {"path": "src/main.py", "content": "print('hello')\\n"}}"""
+        calls, cleaned = extract_text_tool_calls(text, {"write_file"})
+
+        self.assertEqual(
+            calls,
+            [{"name": "write_file", "arguments": {"path": "src/main.py", "content": "print('hello')\n"}}],
+        )
+        self.assertEqual(cleaned, "")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,6 +35,11 @@ def extract_text_tool_calls(text: str, available_tools: Iterable[str]) -> tuple[
         if json_calls:
             tool_calls.extend(json_calls)
             cleaned = json_cleaned
+    if not tool_calls:
+        inline_calls, inline_cleaned = _extract_inline_json_tool_calls(cleaned, allowed)
+        if inline_calls:
+            tool_calls.extend(inline_calls)
+            cleaned = inline_cleaned
 
     cleaned = _normalize_whitespace(cleaned)
     return tool_calls, cleaned
@@ -80,6 +85,23 @@ def _extract_json_tool_calls(text: str, allowed: set[str]) -> tuple[list[dict], 
         cleaned = cleaned.replace(f"```json\r\n{block}```", "")
 
     return tool_calls, cleaned
+
+
+def _extract_inline_json_tool_calls(text: str, allowed: set[str]) -> tuple[list[dict], str]:
+    """Parse a bare JSON payload when the whole response is a tool call object/list."""
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "{[":
+        return [], text
+
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return [], text
+
+    parsed = _normalize_json_payload(payload, allowed)
+    if not parsed:
+        return [], text
+    return parsed, ""
 
 
 def _normalize_json_payload(payload: object, allowed: set[str]) -> list[dict]:
