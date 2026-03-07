@@ -4,6 +4,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import time
 
@@ -61,6 +62,7 @@ DISALLOWED_INLINE_FLAGS = {
     "python3": {"-c"},
     "sh": {"-c"},
 }
+WINDOWS_EXECUTABLE_SUFFIXES = {".exe", ".cmd", ".bat", ".com", ".ps1"}
 
 
 class CommandStopped(Exception):
@@ -82,7 +84,7 @@ class RunCommandTool(BaseTool):
         self.execution_mode = normalized
         self.allowed_commands = set(RESTRICTED_ALLOWED_COMMANDS)
         for command in extra_allowed_commands or []:
-            name = command.strip().lower()
+            name = self._policy_command_name(command)
             if name:
                 self.allowed_commands.add(name)
 
@@ -364,7 +366,7 @@ class RunCommandTool(BaseTool):
             raise ToolError("Command cannot be empty.")
 
         tokens = self._normalize_script_tokens(tokens)
-        command_name = Path(tokens[0]).name.lower()
+        command_name = self._policy_command_name(tokens[0])
         if command_name not in self.allowed_commands:
             raise ToolError(
                 f"Hosted command policy blocks '{tokens[0]}'.\n"
@@ -377,7 +379,7 @@ class RunCommandTool(BaseTool):
                 f"Hosted command policy blocks inline execution flags for '{tokens[0]}'. "
                 "Use checked-in scripts or module commands instead."
             )
-        return tokens
+        return self._resolve_executable_tokens(tokens)
 
     def _normalize_script_tokens(self, tokens: list[str]) -> list[str]:
         first_token = tokens[0]
@@ -393,3 +395,30 @@ class RunCommandTool(BaseTool):
         if suffix == ".sh":
             return ["bash", first_token, *tokens[1:]]
         return tokens
+
+    @staticmethod
+    def _looks_path_like(token: str) -> bool:
+        raw = str(token or "").strip()
+        return bool(Path(raw).anchor or os.sep in raw or (os.altsep and os.altsep in raw))
+
+    @classmethod
+    def _policy_command_name(cls, token: str) -> str:
+        raw = str(token or "").strip().strip("\"'")
+        command_name = Path(raw).name.lower()
+        if cls._looks_path_like(raw):
+            return command_name
+        suffix = Path(command_name).suffix.lower()
+        if suffix in WINDOWS_EXECUTABLE_SUFFIXES:
+            return Path(command_name).stem.lower()
+        return command_name
+
+    def _resolve_executable_tokens(self, tokens: list[str]) -> list[str]:
+        if not tokens:
+            return tokens
+        executable = tokens[0]
+        if self._looks_path_like(executable):
+            return tokens
+        resolved = shutil.which(executable)
+        if not resolved:
+            return tokens
+        return [resolved, *tokens[1:]]

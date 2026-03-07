@@ -7,6 +7,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from rich.panel import Panel
+
 from neudev.cli import (
     InteractivePermissionManager,
     QueuedLocalTaskRunner,
@@ -231,6 +233,33 @@ class CLITests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertTrue(outcome["allowed"])
         self.assertTrue(manager.auto_approve)
+
+    def test_local_permission_panel_lists_main_prompt_choices(self):
+        manager = InteractivePermissionManager()
+        outcome = {}
+
+        def request_permission():
+            outcome["allowed"] = manager.request_permission("run_command", "Run command: npm install")
+
+        with patch("neudev.cli.console.print") as print_mock:
+            worker = threading.Thread(target=request_permission, daemon=True)
+            worker.start()
+            self.assertTrue(self._wait_for_pending_permission(manager))
+            panel = next(
+                call.args[0]
+                for call in print_mock.call_args_list
+                if call.args and isinstance(call.args[0], Panel)
+            )
+            manager.resolve_pending("deny")
+            worker.join(1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(outcome["allowed"])
+        body = str(panel.renderable)
+        self.assertIn("approve once", body)
+        self.assertIn("/approve tool", body)
+        self.assertIn("/approve all", body)
+        self.assertIn("/stop", body)
 
     def test_handle_local_stop_denies_pending_permission(self):
         manager = InteractivePermissionManager()

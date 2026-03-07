@@ -256,6 +256,28 @@ def build_prompt_session() -> PromptSession:
         return PromptSession(completer=completer, style=pt_style)
 
 
+def _format_permission_panel_body(message: str, *, hosted: bool = False) -> str:
+    """Render a readable approval card for the main prompt loop."""
+    stop_hint = (
+        "cancel the blocked hosted turn"
+        if hosted
+        else "stop the active task and deny this request"
+    )
+    lines = [
+        f"[bold white]{message}[/bold white]",
+        "",
+        "[bold bright_yellow]Reply in the main prompt[/bold bright_yellow]",
+        "  [success]y[/success] or [success]/approve[/success]        approve once",
+        "  [success]a[/success] or [success]/approve tool[/success]   approve this tool for the session",
+        "  [success]all[/success] or [success]/approve all[/success]  approve all destructive actions",
+        "  [error]n[/error] or [error]/deny[/error]          deny",
+        f"  [warning]/stop[/warning]                        {stop_hint}",
+        "",
+        "[dim]The active task is paused until you choose one of the options above.[/dim]",
+    ]
+    return "\n".join(lines)
+
+
 @dataclass
 class PendingLocalApproval:
     """A permission request that must be answered from the main CLI prompt."""
@@ -293,16 +315,15 @@ class InteractivePermissionManager(PermissionManager):
         console.print()
         console.print(
             Panel(
-                (
-                    f"[bold]{message}[/bold]\n\n"
-                    "[dim]Reply in the main prompt with "
-                    "`y`, `n`, `a`, `all`, `/approve`, or `/deny`.[/dim]"
-                ),
+                _format_permission_panel_body(message),
                 title=f"[yellow]⚠️  Permission Required: {tool_name}[/yellow]",
                 border_style="yellow",
-                padding=(0, 1),
+                padding=(1, 2),
+                expand=False,
+                width=min(console.width, 86),
             )
         )
+        console.print()
 
         request.event.wait()
         decision = request.decision or PERMISSION_CHOICE_DENY
@@ -373,16 +394,12 @@ class InteractiveRemoteApprovalManager:
         console.print()
         console.print(
             Panel(
-                (
-                    f"[bold]{message}[/bold]\n\n"
-                    "[dim]Reply with `y`, `n`, `a`, or `all`.\n"
-                    "Use `/approve [once|tool|all]`, `/deny`, or `/stop`.[/dim]"
-                ),
+                _format_permission_panel_body(message, hosted=True),
                 title="[bold bright_yellow]Hosted Permission Required[/bold bright_yellow]",
                 border_style="bright_yellow",
                 padding=(1, 2),
                 expand=False,
-                width=min(console.width, 78),
+                width=min(console.width, 86),
             )
         )
         console.print()
@@ -1597,8 +1614,8 @@ def handle_local_permission_input(
 
     raw = user_input.strip()
     warning = (
-        "\n  [warning]⚠️  A permission request is waiting. Reply with `y`, `n`, `a`, `all`, "
-        "`/approve [once|tool|all]`, or `/deny`.[/warning]\n"
+        "\n  [warning]⚠️  A permission request is waiting. Use `y`, `a`, `all`, `n`, "
+        "`/approve [once|tool|all]`, `/deny`, or `/stop`.[/warning]\n"
     )
     decision: str | None
 
@@ -1645,8 +1662,8 @@ def handle_remote_permission_input(
 
     raw = user_input.strip()
     warning = (
-        "\n  [warning]A hosted permission request is waiting. Reply with `y`, `n`, `a`, `all`, "
-        "`/approve [once|tool|all]`, or `/deny`.[/warning]\n"
+        "\n  [warning]A hosted permission request is waiting. Use `y`, `a`, `all`, `n`, "
+        "`/approve [once|tool|all]`, `/deny`, or `/stop`.[/warning]\n"
     )
     decision: str | None
 

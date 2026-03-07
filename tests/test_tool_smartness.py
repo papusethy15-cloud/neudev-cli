@@ -136,11 +136,35 @@ class ToolSmartnessTests(unittest.TestCase):
             stderr="",
         )
 
-        with patch("subprocess.run", return_value=completed) as run_mock:
+        with patch("neudev.tools.run_command.shutil.which", return_value=None), patch(
+            "subprocess.run", return_value=completed
+        ) as run_mock:
             result = tool.execute("python --version")
 
         self.assertIn("Python 3.14.0", result)
         self.assertEqual(run_mock.call_args.args[0], ["python", "--version"])
+        self.assertFalse(run_mock.call_args.kwargs["shell"])
+
+    def test_run_command_restricted_mode_resolves_windows_command_wrappers(self):
+        tool = RunCommandTool()
+        tool.bind_workspace(FIXTURE_ROOT)
+        tool.set_execution_mode("restricted")
+
+        completed = subprocess.CompletedProcess(
+            args=[r"C:\Program Files\nodejs\npm.cmd", "install"],
+            returncode=0,
+            stdout="added 1 package",
+            stderr="",
+        )
+
+        with patch(
+            "neudev.tools.run_command.shutil.which",
+            return_value=r"C:\Program Files\nodejs\npm.cmd",
+        ), patch("subprocess.run", return_value=completed) as run_mock:
+            result = tool.execute("npm install")
+
+        self.assertIn("added 1 package", result)
+        self.assertEqual(run_mock.call_args.args[0], [r"C:\Program Files\nodejs\npm.cmd", "install"])
         self.assertFalse(run_mock.call_args.kwargs["shell"])
 
     def test_run_command_restricted_mode_rejects_inline_execution(self):
