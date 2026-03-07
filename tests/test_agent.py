@@ -580,6 +580,106 @@ class AgentTests(unittest.TestCase):
         self.assertIs(received["stop_event"], stop_event)
 
     @patch("neudev.agent.OllamaClient", FakeOllamaClient)
+    def test_process_message_emits_progress_when_waiting_for_executor_model(self):
+        agent = Agent(self.config, str(self.workspace))
+        agent.llm.responses = [
+            {
+                "content": "Done.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            }
+        ]
+
+        progress_updates = []
+        response = agent.process_message("Write a short greeting", on_progress=progress_updates.append)
+
+        self.assertEqual(response, "Done.")
+        self.assertTrue(progress_updates)
+        self.assertEqual(progress_updates[0]["event"], "model_wait")
+        self.assertEqual(progress_updates[0]["phase"], "executor")
+
+    @patch("neudev.agent.OllamaClient", FakeOllamaClient)
+    def test_process_message_retries_when_repo_task_skips_initial_inspection(self):
+        agent = Agent(self.config, str(self.workspace))
+        agent.llm.responses = [
+            {
+                "content": "I can fix the CLI flow directly without checking the repo.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "",
+                "thinking": "",
+                "tool_calls": [{"name": "read_file", "arguments": {"path": "README.md"}}],
+                "done": False,
+                "native_tools_supported": True,
+            },
+            {
+                "content": "I inspected the README and confirmed the current CLI flow.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
+        ]
+
+        response = agent.process_message("Fix the CLI project creation flow")
+
+        self.assertEqual(response, "I inspected the README and confirmed the current CLI flow.")
+        self.assertTrue(any(action.action == "read" for action in agent.session.actions))
+        self.assertTrue(
+            any(
+                "No repository inspection tools were used yet." in message.get("content", "")
+                for call in agent.llm.chat_with_tools_calls
+                for message in call["messages"]
+            )
+        )
+        self.assertTrue(
+            any(
+                "Use focused inspection tools first" in message.get("content", "")
+                for call in agent.llm.chat_with_tools_calls
+                for message in call["messages"]
+            )
+        )
+
+    @patch("neudev.agent.OllamaClient", FakeOllamaClient)
+    def test_process_message_persists_recent_turn_memory(self):
+        memory_dir = self.workspace / ".memory_store_test"
+        shutil.rmtree(memory_dir, ignore_errors=True)
+        with patch("neudev.project_memory.PROJECT_MEMORY_DIR", memory_dir):
+            agent = Agent(self.config, str(self.workspace))
+            agent.llm.responses = [
+                {
+                    "content": "",
+                    "thinking": "",
+                    "tool_calls": [{"name": "read_file", "arguments": {"path": "README.md"}}],
+                    "done": False,
+                    "native_tools_supported": True,
+                },
+                {
+                    "content": "README inspected.",
+                    "thinking": "",
+                    "tool_calls": [],
+                    "done": True,
+                    "native_tools_supported": True,
+                },
+            ]
+
+            response = agent.process_message("Analyze the README flow")
+
+            self.assertEqual(response, "README inspected.")
+            reloaded = Agent(self.config, str(self.workspace))
+            prompt = reloaded.conversation[0]["content"]
+            self.assertIn("Recent work:", prompt)
+            self.assertIn("Analyze the README flow", prompt)
+            self.assertIn("README.md", prompt)
+        shutil.rmtree(memory_dir, ignore_errors=True)
+
+    @patch("neudev.agent.OllamaClient", FakeOllamaClient)
     def test_system_prompt_describes_fullstack_backend_and_frontend_components(self):
         agent = Agent(self.config, str(FULLSTACK_FIXTURE_ROOT))
         system_prompt = agent.conversation[0]["content"]

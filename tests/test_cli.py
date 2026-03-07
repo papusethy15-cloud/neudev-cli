@@ -10,8 +10,11 @@ from unittest.mock import MagicMock, patch
 from rich.panel import Panel
 
 from neudev.cli import (
+    ExecutionTraceState,
     InteractivePermissionManager,
     QueuedLocalTaskRunner,
+    build_trace_summary_lines,
+    build_live_status_lines,
     build_parser,
     handle_local_queue_command,
     handle_local_permission_input,
@@ -60,6 +63,61 @@ class CLITests(unittest.TestCase):
         self.assertEqual(saved.api_base_url, "https://example.com")
         self.assertEqual(saved.api_key, "secret-token")
         self.assertEqual(saved.websocket_base_url, "wss://example.com/v1/stream")
+
+    def test_build_trace_summary_lines_includes_flow_tools_and_touched_targets(self):
+        trace = ExecutionTraceState()
+        trace.phases = [
+            ("understand", "request + workspace context"),
+            ("planner", "qwen3:latest"),
+            ("executor", "qwen2.5-coder:7b"),
+            ("reviewer", "qwen3:latest"),
+        ]
+        trace.plan_total = 3
+        trace.plan_completed = 2
+        trace.active_plan_item = "Run changed-file diagnostics"
+        trace.tool_counts = {"read_file": 2, "write_file": 1}
+        trace.changed_targets = ["src/App.tsx"]
+        trace.workspace_delta_counts["modified"] = 1
+
+        lines = build_trace_summary_lines(trace)
+        summary = "\n".join(lines)
+
+        self.assertIn("UNDERSTAND -> PLAN -> EXECUTE -> REVIEW", summary)
+        self.assertIn("2/3 completed", summary)
+        self.assertIn("read_file x2, write_file x1", summary)
+        self.assertIn("1 modified", summary)
+        self.assertIn("src/App.tsx", summary)
+
+    def test_build_trace_summary_lines_uses_touched_targets_when_nothing_changed(self):
+        trace = ExecutionTraceState()
+        trace.phases = [("understand", "request + workspace context"), ("executor", "qwen2.5-coder:7b")]
+        trace.tool_counts = {"read_file": 1}
+        trace.touched_targets = ["README.md"]
+
+        lines = build_trace_summary_lines(trace)
+        summary = "\n".join(lines)
+
+        self.assertIn("UNDERSTAND -> EXECUTE", summary)
+        self.assertIn("read_file x1", summary)
+        self.assertIn("README.md", summary)
+
+    def test_build_live_status_lines_shows_current_step_and_waiting_reason(self):
+        trace = ExecutionTraceState()
+        trace.current_phase = "executor"
+        trace.current_model = "qwen2.5-coder:7b"
+        trace.current_detail = "Waiting for the executor model to decide the next step."
+        trace.waiting_for_model = True
+        trace.plan_total = 2
+        trace.plan_completed = 1
+        trace.active_plan_item = "Verify generated files"
+
+        lines = build_live_status_lines(trace)
+        status = "\n".join(lines)
+
+        self.assertIn("EXECUTE", status)
+        self.assertIn("qwen2.5-coder:7b", status)
+        self.assertIn("1/2 completed", status)
+        self.assertIn("Waiting for the model", status)
 
     def test_logout_clears_saved_api_key_only(self):
         with tempfile.TemporaryDirectory() as tempdir:

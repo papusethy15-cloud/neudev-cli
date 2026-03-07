@@ -17,6 +17,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -236,6 +237,344 @@ def render_turn_header(request: str, *, title: str, metadata: list[tuple[str, st
             padding=(0, 1),
             expand=False,
             width=min(console.width, 96),
+        )
+    )
+    console.print()
+
+
+@dataclass
+class ExecutionTraceState:
+    """Capture a user-facing summary of what happened during a turn."""
+
+    started_monotonic: float = field(default_factory=time.monotonic)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    phases: list[tuple[str, str]] = field(default_factory=list)
+    tool_counts: dict[str, int] = field(default_factory=dict)
+    touched_targets: list[str] = field(default_factory=list)
+    changed_targets: list[str] = field(default_factory=list)
+    workspace_delta_counts: dict[str, int] = field(
+        default_factory=lambda: {"modified": 0, "created": 0, "deleted": 0}
+    )
+    plan_total: int = 0
+    plan_completed: int = 0
+    active_plan_item: str = ""
+    current_phase: str = "understand"
+    current_model: str = ""
+    current_detail: str = "Preparing execution trace."
+    current_target: str = ""
+    current_tool: str = ""
+    latest_thinking: str = ""
+    latest_response: str = ""
+    waiting_for_model: bool = False
+
+    def elapsed_seconds(self) -> float:
+        """Return the turn duration."""
+        return round(time.monotonic() - self.started_monotonic, 1)
+
+
+def _phase_label(phase: str) -> str:
+    """Normalize phase labels for UI display."""
+    return {
+        "understand": "UNDERSTAND",
+        "planner": "PLAN",
+        "reviewer-pre": "PRECHECK",
+        "executor": "EXECUTE",
+        "reviewer": "REVIEW",
+        "verify": "VERIFY",
+    }.get(str(phase or "").strip().lower(), str(phase or "step").upper())
+
+
+def _tool_activity_verb(activity_label: str) -> str:
+    """Return a readable verb for a compact tool activity label."""
+    return {
+        "READ": "Inspecting",
+        "SEARCH": "Searching",
+        "SCAN": "Scanning",
+        "REVIEW": "Reviewing",
+        "WRITE": "Writing",
+        "EDIT": "Editing",
+        "PATCH": "Patching",
+        "DELETE": "Deleting",
+        "RUN": "Running",
+        "VERIFY": "Verifying",
+        "TOOL": "Using",
+    }.get(activity_label, "Using")
+
+
+def _append_unique(items: list[str], value: str, *, limit: int = 6) -> None:
+    """Keep a short unique list in insertion order."""
+    cleaned = str(value or "").strip()
+    if not cleaned or cleaned in items:
+        return
+    items.append(cleaned)
+    if len(items) > limit:
+        del items[limit:]
+
+
+def _record_trace_phase(trace: ExecutionTraceState | None, phase: str, model_name: str) -> int:
+    """Store a phase transition and return its display step number."""
+    if trace is None:
+        return 1
+    with trace.lock:
+        trace.phases.append((str(phase or "").strip().lower(), model_name or ""))
+        trace.current_phase = str(phase or "").strip().lower() or trace.current_phase
+        trace.current_model = model_name or trace.current_model
+        trace.waiting_for_model = False
+        return len(trace.phases)
+
+
+def _record_trace_plan(trace: ExecutionTraceState | None, plan_update: dict | None) -> None:
+    """Store the latest plan progress snapshot."""
+    if trace is None or not plan_update:
+        return
+    with trace.lock:
+        plan_items = plan_update.get("plan") or []
+        trace.plan_total = len(plan_items)
+        trace.plan_completed = sum(1 for item in plan_items if item.get("status") == "completed")
+        active = next((item.get("text", "") for item in plan_items if item.get("status") == "in_progress"), "")
+        trace.active_plan_item = str(active or "").strip()
+
+
+def _record_trace_workspace_change(trace: ExecutionTraceState | None, changes: dict | None) -> None:
+    """Store detected workspace deltas for the turn summary."""
+    if trace is None or not changes:
+        return
+    with trace.lock:
+        for label in ("modified", "created", "deleted"):
+            trace.workspace_delta_counts[label] += len(changes.get(label) or [])
+
+
+def _record_trace_tool_event(trace: ExecutionTraceState | None, tool_name: str, payload: dict | None) -> None:
+    """Track tool usage and touched files for the turn summary."""
+    if trace is None:
+        return
+    payload = payload or {}
+    event_type = str(payload.get("event", "start"))
+    target = (
+        payload.get("target")
+        or payload.get("path")
+        or payload.get("command")
+        or payload.get("directory")
+        or ""
+    )
+    target_text = str(target or "").strip()
+    activity_label, _ = _tool_activity_style(tool_name)
+
+    with trace.lock:
+        if event_type == "start":
+            trace.tool_counts[tool_name] = trace.tool_counts.get(tool_name, 0) + 1
+            _append_unique(trace.touched_targets, target_text)
+            trace.current_tool = tool_name
+            trace.current_target = target_text
+            trace.current_detail = f"{_tool_activity_verb(activity_label)} {target_text or tool_name}"
+            trace.waiting_for_model = False
+            return
+
+        if event_type == "progress":
+            mode = str(payload.get("mode", "background_wait"))
+            trace.current_tool = tool_name
+            trace.current_target = target_text
+            trace.current_detail = (
+                f"Waiting for command shutdown: {target_text or tool_name}"
+                if mode == "stop_requested"
+                else f"Command still running: {target_text or tool_name}"
+            )
+            trace.waiting_for_model = False
+            return
+
+        if event_type != "result":
+            return
+
+        _append_unique(trace.touched_targets, target_text)
+        if payload.get("action") in {"write", "delete"} or payload.get("lines_added") or payload.get("lines_deleted"):
+            _append_unique(trace.changed_targets, target_text)
+        trace.current_tool = tool_name
+        trace.current_target = target_text
+        trace.current_detail = (
+            f"Completed {tool_name}: {target_text or tool_name}"
+            if payload.get("success", True)
+            else f"{tool_name} reported an issue: {target_text or tool_name}"
+        )
+        trace.waiting_for_model = False
+
+
+def _record_trace_progress(trace: ExecutionTraceState | None, payload: dict | None) -> None:
+    """Store model-wait and step-detail updates for the live panel."""
+    if trace is None or not payload:
+        return
+    event_type = str(payload.get("event", "")).strip().lower()
+    phase = str(payload.get("phase", "")).strip().lower()
+    model = str(payload.get("model", "")).strip()
+    detail = str(payload.get("detail", "")).strip()
+    with trace.lock:
+        if phase:
+            trace.current_phase = phase
+        if model:
+            trace.current_model = model
+        if event_type == "model_wait":
+            trace.waiting_for_model = True
+            trace.current_detail = detail or "Waiting for model response."
+        elif detail:
+            trace.waiting_for_model = False
+            trace.current_detail = detail
+
+
+def _record_trace_thinking(trace: ExecutionTraceState | None, text: str) -> None:
+    """Store the latest reasoning snippet for the live panel."""
+    if trace is None or not text:
+        return
+    lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+    snippet = " ".join(lines[:2]) if lines else str(text).strip()
+    with trace.lock:
+        trace.latest_thinking = _truncate_cli_value(snippet, limit=110)
+        if trace.waiting_for_model:
+            trace.current_detail = "Model returned reasoning for the next step."
+
+
+def _record_trace_response(trace: ExecutionTraceState | None, text: str) -> None:
+    """Store the latest response snippet for the live panel."""
+    if trace is None or not text:
+        return
+    snippet = " ".join(str(text).split())
+    with trace.lock:
+        trace.latest_response = _truncate_cli_value(snippet, limit=110)
+        trace.current_detail = "Drafting the user-facing response."
+        trace.waiting_for_model = False
+
+
+def build_live_status_lines(trace: ExecutionTraceState) -> list[str]:
+    """Build a compact real-time status view for the active turn."""
+    with trace.lock:
+        elapsed = trace.elapsed_seconds()
+        phase_label = _phase_label(trace.current_phase)
+        spinner_frames = ["|", "/", "-", "\\"]
+        spinner = spinner_frames[int(elapsed * 5) % len(spinner_frames)]
+        headline = f"{spinner} {phase_label}"
+        if trace.current_detail:
+            headline += f" | {_truncate_cli_value(trace.current_detail, limit=72)}"
+
+        lines = [f"[bold white]{headline}[/bold white]"]
+        model_text = trace.current_model or "pending selection"
+        lines.append(f"[muted]Model[/muted] [white]{model_text}[/white]")
+        lines.append(f"[muted]Elapsed[/muted] [white]{elapsed:.1f}s[/white]")
+
+        if trace.plan_total:
+            lines.append(
+                f"[muted]Plan[/muted] [white]{trace.plan_completed}/{trace.plan_total} completed[/white]"
+                + (
+                    f" [dim]| active: {_truncate_cli_value(trace.active_plan_item, limit=42)}[/dim]"
+                    if trace.active_plan_item
+                    else ""
+                )
+            )
+
+        if trace.current_target:
+            lines.append(f"[muted]Target[/muted] [white]{_truncate_cli_value(trace.current_target, limit=72)}[/white]")
+
+        if trace.tool_counts:
+            total_tool_calls = sum(trace.tool_counts.values())
+            lines.append(f"[muted]Tools[/muted] [white]{total_tool_calls} call(s)[/white]")
+
+        if trace.latest_thinking:
+            lines.append(f"[muted]Thinking[/muted] [dim]{trace.latest_thinking}[/dim]")
+        elif trace.waiting_for_model:
+            lines.append("[muted]Thinking[/muted] [dim]Waiting for the model to return the next step...[/dim]")
+
+        if trace.latest_response and not trace.waiting_for_model:
+            lines.append(f"[muted]Draft[/muted] [dim]{trace.latest_response}[/dim]")
+
+        return lines
+
+
+def build_live_status_panel(trace: ExecutionTraceState) -> Panel:
+    """Build the live status panel renderable."""
+    return Panel(
+        "\n".join(build_live_status_lines(trace)),
+        border_style="grey50",
+        title="[grey62]Live Status[/grey62]",
+        padding=(0, 1),
+        expand=False,
+        width=min(console.width, 96),
+    )
+
+
+def _run_live_trace_panel(trace: ExecutionTraceState, runner) -> None:
+    """Refresh the transient live status panel while a turn is active."""
+    stop_event = threading.Event()
+
+    def refresh_loop(live: Live) -> None:
+        while not stop_event.is_set():
+            live.update(build_live_status_panel(trace), refresh=True)
+            stop_event.wait(0.2)
+
+    with Live(build_live_status_panel(trace), console=console, refresh_per_second=8, transient=True) as live:
+        worker = threading.Thread(target=refresh_loop, args=(live,), daemon=True)
+        worker.start()
+        try:
+            runner()
+            live.update(build_live_status_panel(trace), refresh=True)
+        finally:
+            stop_event.set()
+            worker.join(timeout=1)
+
+
+def build_trace_summary_lines(trace: ExecutionTraceState) -> list[str]:
+    """Build compact summary lines for a completed turn."""
+    lines = [f"[bold white]Elapsed[/bold white] {trace.elapsed_seconds():.1f}s"]
+
+    if trace.phases:
+        labels = []
+        for phase, _model in trace.phases:
+            label = {
+                "understand": "UNDERSTAND",
+                "planner": "PLAN",
+                "reviewer-pre": "PRECHECK",
+                "executor": "EXECUTE",
+                "reviewer": "REVIEW",
+                "verify": "VERIFY",
+            }.get(phase, phase.upper())
+            if not labels or labels[-1] != label:
+                labels.append(label)
+        lines.append(f"[bold white]Flow[/bold white] {' -> '.join(labels)}")
+
+    if trace.plan_total:
+        plan_line = f"[bold white]Plan[/bold white] {trace.plan_completed}/{trace.plan_total} completed"
+        if trace.active_plan_item:
+            plan_line += f" | active: {_truncate_cli_value(trace.active_plan_item, limit=56)}"
+        lines.append(plan_line)
+
+    if trace.tool_counts:
+        tool_parts = [f"{name} x{count}" for name, count in sorted(trace.tool_counts.items())]
+        lines.append(f"[bold white]Tools[/bold white] {', '.join(tool_parts[:5])}")
+
+    if any(trace.workspace_delta_counts.values()):
+        delta_parts = [
+            f"{count} {label}"
+            for label, count in trace.workspace_delta_counts.items()
+            if count
+        ]
+        lines.append(f"[bold white]Workspace Delta[/bold white] {', '.join(delta_parts)}")
+
+    targets = trace.changed_targets or trace.touched_targets
+    if targets:
+        lines.append(f"[bold white]Touched[/bold white] {', '.join(_truncate_cli_value(item, limit=32) for item in targets[:4])}")
+
+    return lines
+
+
+def render_trace_summary(trace: ExecutionTraceState) -> None:
+    """Render a compact summary of the completed turn."""
+    lines = build_trace_summary_lines(trace)
+    if not lines:
+        return
+    console.print(
+        Panel(
+            "\n".join(lines),
+            border_style="bright_blue",
+            title="[bold bright_cyan]Trace Summary[/bold bright_cyan]",
+            padding=(0, 1),
+            expand=False,
+            width=min(console.width, 92),
         )
     )
     console.print()
@@ -473,10 +812,11 @@ def handle_help() -> None:
     console.print()
 
 
-def render_plan_panel(plan_update: dict | None) -> None:
+def render_plan_panel(plan_update: dict | None, *, trace: ExecutionTraceState | None = None) -> None:
     """Render remote or local plan progress."""
     if not plan_update:
         return
+    _record_trace_plan(trace, plan_update)
     plan_items = plan_update.get("plan") or []
     conventions = plan_update.get("conventions") or []
     lines = []
@@ -514,10 +854,11 @@ def render_plan_panel(plan_update: dict | None) -> None:
     console.print()
 
 
-def render_workspace_change(changes: dict | None) -> None:
+def render_workspace_change(changes: dict | None, *, trace: ExecutionTraceState | None = None) -> None:
     """Render detected workspace changes."""
     if not changes:
         return
+    _record_trace_workspace_change(trace, changes)
     parts = []
     preview = []
     for label in ("modified", "created", "deleted"):
@@ -563,17 +904,33 @@ def render_thinking(thinking: str) -> None:
     console.print()
 
 
-def render_phase_event(phase: str, model_name: str) -> None:
+def render_phase_event(phase: str, model_name: str, *, trace: ExecutionTraceState | None = None) -> None:
     """Render the current execution phase in a consistent format."""
+    normalized_phase = str(phase or "").strip().lower()
     labels = {
+        "understand": "UNDERSTAND",
         "planner": "PLAN",
+        "reviewer-pre": "PRECHECK",
         "executor": "EXECUTE",
         "reviewer": "REVIEW",
         "verify": "VERIFY",
     }
-    label = labels.get(str(phase or "").strip().lower(), str(phase or "step").upper())
+    descriptions = {
+        "understand": "Inspecting the request, workspace context, and execution route.",
+        "planner": "Building a focused execution checklist before edits.",
+        "reviewer-pre": "Checking likely risks and missing validations before execution.",
+        "executor": "Running the main implementation loop and calling tools as needed.",
+        "reviewer": "Reviewing the completed work for gaps or regressions.",
+        "verify": "Running final checks before returning the answer.",
+    }
+    step_number = _record_trace_phase(trace, normalized_phase, model_name)
+    label = labels.get(normalized_phase, str(phase or "step").upper())
     model = model_name or "default model"
-    console.print(f"    [accent]{label:<8}[/accent] [dim]{model}[/dim]")
+    detail = descriptions.get(normalized_phase, "Advancing the current task.")
+    console.print(
+        f"  [accent]{step_number:02d}. {label:<10}[/accent] [white]{detail}[/white]"
+    )
+    console.print(f"      [dim]model: {model}[/dim]")
 
 
 def _tool_activity_style(tool_name: str) -> tuple[str, str]:
@@ -581,9 +938,15 @@ def _tool_activity_style(tool_name: str) -> tuple[str, str]:
     return TOOL_ACTIVITY_META.get(tool_name, ("TOOL", "tool"))
 
 
-def render_tool_event(tool_name: str, payload: dict | None) -> None:
+def render_tool_event(
+    tool_name: str,
+    payload: dict | None,
+    *,
+    trace: ExecutionTraceState | None = None,
+) -> None:
     """Render compact live tool activity."""
     payload = payload or {}
+    _record_trace_tool_event(trace, tool_name, payload)
     event_type = str(payload.get("event", "start"))
     activity_label, activity_style = _tool_activity_style(tool_name)
     target = (
@@ -604,7 +967,8 @@ def render_tool_event(tool_name: str, payload: dict | None) -> None:
         suffix = f"{detail} | started {started_at}".strip(" |")
         console.print(
             f"    [{activity_style}]{activity_label:<7}[/{activity_style}] "
-            f"[warning]{state}[/warning] [white]{target_text}[/white] [dim]{suffix}[/dim]"
+            f"[warning]{state}[/warning] [white]{_tool_activity_verb(activity_label)} {target_text}[/white] "
+            f"[dim]{suffix}[/dim]"
         )
         return
 
@@ -631,7 +995,7 @@ def render_tool_event(tool_name: str, payload: dict | None) -> None:
     suffix = f"started {started_at}".strip()
     console.print(
         f"    [{activity_style}]{activity_label:<7}[/{activity_style}] "
-        f"[info]START[/info] [white]{target_text}[/white] [dim]{suffix}[/dim]"
+        f"[info]START[/info] [white]{_tool_activity_verb(activity_label)} {target_text}[/white] [dim]{suffix}[/dim]"
     )
 
 
@@ -1341,6 +1705,7 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
     """Process a local user message."""
     runtime_label = "hybrid" if agent.config.runtime_mode == "hybrid" else "local"
     command_policy_display = getattr(agent, "_command_policy_display", "unknown")
+    trace = ExecutionTraceState()
     console.print()
     render_turn_header(
         user_input,
@@ -1354,25 +1719,40 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
         ],
     )
     console.print(
-        "  [dim]Live plan, tool, and verification events appear below. "
+        "  [dim]NeuDev will show each phase, tool action, and verification step below in real time. "
         "Use /stop to request cancellation. While work is active, use `/queue add <message>` for intentional follow-ups.[/dim]"
     )
     console.print()
     thinking_parts: list[str] = []
     response = ""
 
-    try:
+    def handle_thinking(text: str) -> None:
+        thinking_parts.append(text)
+        _record_trace_thinking(trace, text)
+
+    def handle_text(text: str) -> None:
+        _record_trace_response(trace, text)
+
+    def run_turn() -> None:
+        nonlocal response
+        render_phase_event("understand", "request + workspace context", trace=trace)
         response = agent.process_message(
             user_input,
-            on_status=render_tool_event,
-            on_thinking=thinking_parts.append,
-            on_phase=render_phase_event,
-            on_workspace_change=render_workspace_change,
+            on_status=lambda tool_name, payload: render_tool_event(tool_name, payload, trace=trace),
+            on_thinking=handle_thinking,
+            on_text=handle_text,
+            on_phase=lambda phase, model_name: render_phase_event(phase, model_name, trace=trace),
+            on_workspace_change=lambda changes: render_workspace_change(changes, trace=trace),
             on_plan_update=lambda plan, conventions: render_plan_panel(
-                {"plan": [dict(item) for item in plan], "conventions": list(conventions)}
+                {"plan": [dict(item) for item in plan], "conventions": list(conventions)},
+                trace=trace,
             ),
+            on_progress=lambda payload: _record_trace_progress(trace, payload),
             stop_event=stop_event,
         )
+
+    try:
+        _run_live_trace_panel(trace, run_turn)
     except LLMError as exc:
         console.print(
             Panel(
@@ -1399,6 +1779,7 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
         return None
 
     render_thinking("".join(thinking_parts).strip())
+    render_trace_summary(trace)
     render_agent_routing(
         agent.config,
         agent_team={
@@ -1896,6 +2277,7 @@ def _consume_remote_stream(
     stream,
     *,
     approval_manager: InteractiveRemoteApprovalManager | None = None,
+    trace: ExecutionTraceState | None = None,
 ) -> dict[str, object] | None:
     """Render streamed remote events and return the final payload."""
     final_payload = None
@@ -1905,13 +2287,19 @@ def _consume_remote_stream(
         payload = event.get("data", {}) or {}
 
         if event_name == "workspace_change":
-            render_workspace_change(payload)
+            render_workspace_change(payload, trace=trace)
         elif event_name == "phase":
-            render_phase_event(payload.get("phase", ""), payload.get("model", ""))
+            render_phase_event(payload.get("phase", ""), payload.get("model", ""), trace=trace)
         elif event_name == "status":
-            render_tool_event(payload.get("tool", ""), payload.get("args", {}))
+            render_tool_event(payload.get("tool", ""), payload.get("args", {}), trace=trace)
         elif event_name == "plan_update":
-            render_plan_panel(payload)
+            render_plan_panel(payload, trace=trace)
+        elif event_name == "progress":
+            _record_trace_progress(trace, payload)
+        elif event_name == "thinking":
+            _record_trace_thinking(trace, payload.get("chunk", ""))
+        elif event_name == "text":
+            _record_trace_response(trace, payload.get("chunk", ""))
         elif event_name == "approval_required":
             if approval_manager is None:
                 console.print()
@@ -1935,6 +2323,7 @@ def _consume_remote_stream(
                     transport=config.stream_transport,
                 ),
                 approval_manager=approval_manager,
+                trace=trace,
             )
         elif event_name == "error":
             render_remote_error(payload)
@@ -1954,6 +2343,7 @@ def process_remote_user_input(
 ) -> None:
     """Process a remote user message."""
     remote_snapshot = session.config_snapshot or {}
+    trace = ExecutionTraceState()
     console.print()
     render_turn_header(
         user_input,
@@ -1969,17 +2359,25 @@ def process_remote_user_input(
         ],
     )
     console.print(
-        "  [dim]Hosted plan, tool, and verification events appear below. "
+        "  [dim]Hosted plan, tool, and verification events appear below in real time. "
         "Use /stop to interrupt the active turn. While work is active, use `/queue add <message>` for intentional follow-ups.[/dim]"
     )
     console.print()
-    try:
+    payload: dict[str, object] | None = None
+
+    def run_turn() -> None:
+        nonlocal payload
+        render_phase_event("understand", "request + hosted session context", trace=trace)
         payload = _consume_remote_stream(
             session,
             config,
             session.stream_message(user_input, transport=config.stream_transport),
             approval_manager=approval_manager,
+            trace=trace,
         )
+
+    try:
+        _run_live_trace_panel(trace, run_turn)
     except RemoteAPIError as exc:
         console.print(
             Panel(
@@ -2003,6 +2401,7 @@ def process_remote_user_input(
         return
 
     render_thinking(payload.get("thinking", ""))
+    render_trace_summary(trace)
     render_agent_routing(
         config,
         agent_team=payload.get("agent_team"),

@@ -417,6 +417,7 @@ class HostedSessionService:
         thinking_chunks: list[str] = []
         response_chunks: list[str] = []
         status_events: list[dict[str, Any]] = []
+        progress_events: list[dict[str, Any]] = []
         stop_event = threading.Event()
 
         def record_workspace_change(changes: dict[str, list[str]]) -> None:
@@ -439,6 +440,12 @@ class HostedSessionService:
             status_events.append(payload)
             if emit:
                 emit("status", payload)
+
+        def record_progress(payload: dict[str, Any]) -> None:
+            snapshot = dict(payload)
+            progress_events.append(snapshot)
+            if emit:
+                emit("progress", snapshot)
 
         def record_thinking(text: str) -> None:
             thinking_chunks.append(text)
@@ -469,6 +476,7 @@ class HostedSessionService:
                         on_status=record_status,
                         on_text=record_text,
                         on_thinking=record_thinking,
+                        on_progress=record_progress,
                         on_phase=record_phase,
                         on_workspace_change=record_workspace_change,
                         on_plan_update=record_plan_update,
@@ -511,6 +519,7 @@ class HostedSessionService:
                     "workspace_changes": workspace_changes[-1] if workspace_changes else None,
                     "plan_update": plan_updates[-1] if plan_updates else None,
                     "status_events": status_events,
+                    "progress_events": progress_events,
                     "agent_team": self._team_snapshot(session),
                     "review_notes": session.agent.last_review_notes,
                     "display_model": session.agent.llm.get_display_model(),

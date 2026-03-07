@@ -487,7 +487,7 @@ class WorkspaceContext:
 
         memory_notes = info.get("memory_notes") or []
         if memory_notes:
-            parts.append("Project Memory:\n" + "\n".join(f"- {item}" for item in memory_notes[:6]))
+            parts.append("Project Memory:\n" + "\n".join(f"- {item}" for item in memory_notes[:8]))
 
         conventions = info.get("conventions") or []
         if conventions:

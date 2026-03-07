@@ -159,8 +159,42 @@ class ProjectMemoryStore:
             notes.append("Do not introduce a new language or framework unless the user explicitly asks for a stack change.")
         if components:
             notes.append(f"Preserve component layout: {', '.join(components[:4])}.")
+        recent_turn_notes = self.data.get("recent_turn_notes", [])
+        notes.extend(f"Recent work: {item}" for item in recent_turn_notes[:2])
         notes.extend(conventions[:4])
-        return notes[:6]
+        return notes[:8]
+
+    def record_turn(
+        self,
+        *,
+        user_message: str,
+        action_targets: list[str],
+        review_notes: str = "",
+        response: str = "",
+    ) -> bool:
+        """Persist a compact memory of recent work for the next turn."""
+        summary = self._build_turn_summary(
+            user_message=user_message,
+            action_targets=action_targets,
+            review_notes=review_notes,
+            response=response,
+        )
+        if not summary:
+            return False
+
+        updated = dict(self.data)
+        existing = [str(item) for item in updated.get("recent_turn_notes", [])]
+        recent = [summary]
+        recent.extend(item for item in existing if item != summary)
+        recent = recent[:4]
+        changed = self._set(updated, "recent_turn_notes", recent)
+
+        if changed:
+            updated["updated_at"] = self._timestamp()
+            self._save(updated)
+        else:
+            self.data = updated
+        return changed
 
     def has_saved_memory(self) -> bool:
         """Return whether meaningful workspace memory already exists."""
@@ -169,6 +203,7 @@ class ProjectMemoryStore:
             or self.data.get("preferred_conventions")
             or self.data.get("observed_technologies")
             or self.data.get("preferred_technologies")
+            or self.data.get("recent_turn_notes")
         )
 
     def _load(self) -> dict:
@@ -197,6 +232,7 @@ class ProjectMemoryStore:
             "preferred_technologies": [],
             "observed_conventions": [],
             "preferred_conventions": [],
+            "recent_turn_notes": [],
             "updated_at": "",
         }
 
@@ -282,3 +318,45 @@ class ProjectMemoryStore:
         if "architecture" in lowered or "mvc" in lowered or "feature-first" in lowered or "atomic-design" in lowered:
             return "architecture"
         return None
+
+    @staticmethod
+    def _build_turn_summary(
+        *,
+        user_message: str,
+        action_targets: list[str],
+        review_notes: str,
+        response: str,
+    ) -> str:
+        """Summarize the most recent turn in one compact memory line."""
+        request = " ".join(str(user_message or "").split())
+        if not request:
+            return ""
+        if len(request) > 72:
+            request = request[:69].rstrip() + "..."
+
+        targets = []
+        seen = set()
+        for target in action_targets:
+            cleaned = str(target or "").strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            targets.append(cleaned)
+            if len(targets) >= 3:
+                break
+
+        issue = " ".join(str(review_notes or "").replace("-", " ").split())
+        if issue:
+            if len(issue) > 70:
+                issue = issue[:67].rstrip() + "..."
+            return f"{request} | follow-up issue: {issue}"
+
+        if targets:
+            return f"{request} | touched: {', '.join(targets)}"
+
+        outcome = " ".join(str(response or "").split())
+        if outcome:
+            if len(outcome) > 70:
+                outcome = outcome[:67].rstrip() + "..."
+            return f"{request} | outcome: {outcome}"
+        return request

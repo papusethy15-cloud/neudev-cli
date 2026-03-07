@@ -175,6 +175,7 @@ class Agent:
         on_status=None,
         on_text=None,
         on_thinking=None,
+        on_progress=None,
         on_phase=None,
         on_workspace_change=None,
         on_plan=None,
@@ -219,6 +220,7 @@ class Agent:
         orchestration = self._prepare_orchestration(
             working_conversation,
             tool_defs,
+            on_progress=on_progress,
             on_phase=on_phase,
         )
         if orchestration:
@@ -244,6 +246,7 @@ class Agent:
             on_status=on_status,
             on_text=on_text,
             on_thinking=on_thinking,
+            on_progress=on_progress,
             on_plan_update=on_plan_update,
             stop_event=stop_event,
             warned_about_tool_fallback=False,
@@ -255,6 +258,7 @@ class Agent:
                 working_conversation,
                 orchestration,
                 tool_defs,
+                user_message=user_message,
                 final_response=final_response,
                 turn_action_start=turn_action_start,
                 preferred_models=preferred_models,
@@ -263,6 +267,7 @@ class Agent:
                 on_status=on_status,
                 on_text=on_text,
                 on_thinking=on_thinking,
+                on_progress=on_progress,
                 on_plan_update=on_plan_update,
                 stop_event=stop_event,
                 warned_about_tool_fallback=warned_about_tool_fallback,
@@ -279,6 +284,7 @@ class Agent:
             final_response=final_response,
             orchestration=orchestration,
             turn_action_start=turn_action_start,
+            on_progress=on_progress,
             on_phase=on_phase,
         )
         if self._advance_plan_progress_for_stage("verify"):
@@ -296,6 +302,12 @@ class Agent:
             if working_conversation and working_conversation[-1].get("role") == "assistant":
                 working_conversation[-1]["content"] = final_response
 
+        self.context.memory.record_turn(
+            user_message=user_message,
+            action_targets=self._collect_turn_action_targets(self.session.actions[turn_action_start:]),
+            review_notes=self.last_review_notes,
+            response=final_response,
+        )
         self._persist_turn_state(working_conversation)
         return final_response
 
@@ -569,6 +581,7 @@ class Agent:
         on_status=None,
         on_text=None,
         on_thinking=None,
+        on_progress=None,
         on_plan_update=None,
         stop_event=None,
         warned_about_tool_fallback: bool,
@@ -584,6 +597,15 @@ class Agent:
                 break
 
             try:
+                if on_progress:
+                    on_progress(
+                        {
+                            "event": "model_wait",
+                            "phase": "executor",
+                            "model": preferred_models[0] if preferred_models else getattr(self.llm, "model", ""),
+                            "detail": "Waiting for the executor model to decide the next step.",
+                        }
+                    )
                 runtime_messages = self._build_runtime_messages(working_conversation, orchestration)
                 result = self.llm.chat_with_tools(
                     messages=runtime_messages,
@@ -679,6 +701,7 @@ class Agent:
         orchestration: OrchestrationContext | None,
         tool_defs: list[dict],
         *,
+        user_message: str,
         final_response: str,
         turn_action_start: int,
         preferred_models: list[str] | None,
@@ -687,6 +710,7 @@ class Agent:
         on_status=None,
         on_text=None,
         on_thinking=None,
+        on_progress=None,
         on_plan_update=None,
         stop_event=None,
         warned_about_tool_fallback: bool,
@@ -699,6 +723,11 @@ class Agent:
         had_turn_actions = bool(turn_actions)
         mutated_workspace = any(action.action in {"created", "modified", "deleted"} for action in turn_actions)
         diagnostics_result = ""
+        requires_initial_repo_checks = (
+            not had_turn_actions
+            and self._should_require_initial_repo_checks(user_message)
+            and not self._looks_like_clarification_response(final_response)
+        )
 
         if mutated_workspace and self._should_run_completion_diagnostics(turn_actions):
             diagnostics_result = self._execute_tool(
@@ -723,7 +752,7 @@ class Agent:
             if item.get("status") in {"pending", "in_progress"}
         ]
         diagnostics_failed = bool(diagnostics_result) and self._tool_result_failed(diagnostics_result)
-        needs_retry = diagnostics_failed or (had_turn_actions and bool(incomplete_items))
+        needs_retry = requires_initial_repo_checks or diagnostics_failed or (had_turn_actions and bool(incomplete_items))
         if not needs_retry:
             return final_response
 
@@ -733,6 +762,13 @@ class Agent:
         guard_lines = [
             "Internal completion guard: do not summarize yet.",
         ]
+        if requires_initial_repo_checks:
+            guard_lines.append(
+                "No repository inspection tools were used yet. Inspect the relevant files, configs, or tests before the final answer."
+            )
+            guard_lines.append(
+                "Use focused inspection tools first, confirm the actual state of the workspace, then continue with changes or verification."
+            )
         if diagnostics_failed:
             guard_lines.append(
                 "Changed-file diagnostics reported an error. Fix the underlying issue before the final answer."
@@ -756,6 +792,7 @@ class Agent:
             on_status=on_status,
             on_text=on_text,
             on_thinking=on_thinking,
+            on_progress=on_progress,
             on_plan_update=on_plan_update,
             stop_event=stop_event,
             warned_about_tool_fallback=warned_about_tool_fallback,
@@ -794,6 +831,72 @@ class Agent:
             if target.name.lower() in special_files:
                 return True
         return False
+
+    @staticmethod
+    def _should_require_initial_repo_checks(user_message: str) -> bool:
+        """Require repo inspection before finalizing repo-specific implementation or analysis requests."""
+        lowered = f" {str(user_message or '').lower()} "
+        implementation_keywords = (
+            " fix ", " build ", " create ", " implement ", " update ", " edit ",
+            " change ", " modify ", " refactor ", " debug ", " generate ",
+            " wire ", " scaffold ", " add ", " remove ",
+        )
+        inspection_keywords = (
+            " analyze ", " inspect ", " understand ", " review ", " check ",
+            " verify ", " summarize ", " explain ", " audit ", " investigate ",
+        )
+        repo_scope_keywords = (
+            " project ", " repo ", " repository ", " codebase ", " workspace ",
+            " file ", " files ", " folder ", " module ", " component ", " cli ",
+            " agent ", " readme ", " package.json ", " pyproject.toml ",
+        )
+        if any(keyword in lowered for keyword in implementation_keywords):
+            return True
+        return any(keyword in lowered for keyword in inspection_keywords) and any(
+            keyword in lowered for keyword in repo_scope_keywords
+        )
+
+    @staticmethod
+    def _looks_like_clarification_response(final_response: str) -> bool:
+        """Allow direct clarification questions without forcing repo inspection first."""
+        text = " ".join(str(final_response or "").split()).lower()
+        if not text:
+            return False
+        clarification_markers = (
+            "could you clarify",
+            "can you clarify",
+            "please provide",
+            "please share",
+            "which ",
+            "what ",
+            "where ",
+            "do you want",
+        )
+        return text.endswith("?") or any(marker in text for marker in clarification_markers)
+
+    def _collect_turn_action_targets(self, turn_actions, limit: int = 6) -> list[str]:
+        """Collect a compact set of repo-relative action targets for turn memory."""
+        targets = []
+        seen = set()
+        workspace_root = Path(self.workspace)
+        for action in turn_actions:
+            raw_target = str(getattr(action, "target", "") or "").strip()
+            if not raw_target:
+                continue
+            normalized = raw_target
+            candidate = Path(raw_target)
+            try:
+                if candidate.is_absolute():
+                    normalized = candidate.resolve().relative_to(workspace_root).as_posix()
+            except (OSError, ValueError):
+                normalized = raw_target.replace("\\", "/")
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            targets.append(normalized)
+            if len(targets) >= limit:
+                break
+        return targets
 
     @staticmethod
     def _is_stop_requested(stop_event) -> bool:
@@ -987,7 +1090,7 @@ class Agent:
         latin_count = len(re.findall(r"[A-Za-z]", text))
         return not (cjk_count >= 12 and cjk_count > latin_count)
 
-    def _prepare_orchestration(self, messages: list[dict], tool_defs: list[dict], on_phase=None) -> OrchestrationContext | None:
+    def _prepare_orchestration(self, messages: list[dict], tool_defs: list[dict], on_progress=None, on_phase=None) -> OrchestrationContext | None:
         """Create a planner/executor/reviewer team for auto mode."""
         agent_mode = self._agent_mode()
         if agent_mode == "single":
@@ -1001,12 +1104,12 @@ class Agent:
         self.last_agent_team = team
 
         if agent_mode == "parallel":
-            return self._run_parallel_preflight(messages, tool_defs, team, on_phase=on_phase)
+            return self._run_parallel_preflight(messages, tool_defs, team, on_progress=on_progress, on_phase=on_phase)
 
         if on_phase:
             on_phase("planner", team.planner)
 
-        brief = self._run_planner(messages, tool_defs, team)
+        brief = self._run_planner(messages, tool_defs, team, on_progress=on_progress)
         parsed = self._parse_planner_brief(brief)
         convention_notes = parsed["conventions"] or self.context.analyze().get("conventions", [])
         return OrchestrationContext(
@@ -1052,7 +1155,7 @@ class Agent:
             return [conversation[0], *injected_messages, *conversation[1:]]
         return [*injected_messages, *conversation]
 
-    def _run_planner(self, messages: list[dict], tool_defs: list[dict], team: AgentTeam) -> str:
+    def _run_planner(self, messages: list[dict], tool_defs: list[dict], team: AgentTeam, on_progress=None) -> str:
         """Ask the planner model for a concise execution brief."""
         tool_names = ", ".join(tool["function"]["name"] for tool in tool_defs if tool.get("function"))
         planner_messages = [
@@ -1082,6 +1185,15 @@ class Agent:
             },
         ]
         try:
+            if on_progress:
+                on_progress(
+                    {
+                        "event": "model_wait",
+                        "phase": "planner",
+                        "model": team.planner,
+                        "detail": "Planner is building the execution checklist.",
+                    }
+                )
             response = self.llm.chat_with_fallback(
                 planner_messages,
                 think=False,
@@ -1098,6 +1210,7 @@ class Agent:
         messages: list[dict],
         tool_defs: list[dict],
         team: AgentTeam,
+        on_progress=None,
         on_phase=None,
     ) -> OrchestrationContext:
         """Run planner and pre-review specialist concurrently before execution."""
@@ -1106,8 +1219,8 @@ class Agent:
             on_phase("reviewer-pre", team.reviewer)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            planner_future = pool.submit(self._run_planner, messages, tool_defs, team)
-            review_future = pool.submit(self._run_preflight_reviewer, messages, tool_defs, team)
+            planner_future = pool.submit(self._run_planner, messages, tool_defs, team, on_progress)
+            review_future = pool.submit(self._run_preflight_reviewer, messages, tool_defs, team, on_progress)
             brief = planner_future.result()
             review_checklist = review_future.result()
         parsed = self._parse_planner_brief(brief)
@@ -1121,7 +1234,7 @@ class Agent:
             convention_notes=convention_notes,
         )
 
-    def _run_preflight_reviewer(self, messages: list[dict], tool_defs: list[dict], team: AgentTeam) -> str:
+    def _run_preflight_reviewer(self, messages: list[dict], tool_defs: list[dict], team: AgentTeam, on_progress=None) -> str:
         """Ask the reviewer model for an internal checklist before execution."""
         tool_names = ", ".join(tool["function"]["name"] for tool in tool_defs if tool.get("function"))
         reviewer_messages = [
@@ -1145,6 +1258,15 @@ class Agent:
         ]
 
         try:
+            if on_progress:
+                on_progress(
+                    {
+                        "event": "model_wait",
+                        "phase": "reviewer-pre",
+                        "model": team.reviewer,
+                        "detail": "Pre-review is checking likely risks before execution.",
+                    }
+                )
             response = self.llm.chat_with_fallback(
                 reviewer_messages,
                 think=False,
@@ -1162,6 +1284,7 @@ class Agent:
         final_response: str,
         orchestration: OrchestrationContext | None,
         turn_action_start: int,
+        on_progress=None,
         on_phase=None,
     ) -> str:
         """Ask the reviewer model to sanity-check the executor result."""
@@ -1198,6 +1321,15 @@ class Agent:
         ]
 
         try:
+            if on_progress:
+                on_progress(
+                    {
+                        "event": "model_wait",
+                        "phase": "reviewer",
+                        "model": orchestration.team.reviewer,
+                        "detail": "Reviewer is checking the completed work for gaps.",
+                    }
+                )
             response = self.llm.chat_with_fallback(
                 review_messages,
                 think=False,
