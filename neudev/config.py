@@ -21,12 +21,14 @@ class NeuDevConfig:
     # LLM settings
     model: str = "auto"
     temperature: float = 0.7
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     ollama_host: str = "http://localhost:11434"
 
     # Agent settings
     max_iterations: int = 20
     command_timeout: int = 30
+    gpu_vram_gb: int = 16
+    max_context_messages: int = 40
 
     # Session settings
     auto_permission: bool = False

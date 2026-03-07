@@ -15,7 +15,7 @@ class WriteFileTool(BaseTool):
         return (
             "Create a new file or overwrite an existing file with the given content. "
             "Parent directories are created automatically. Use this to create new "
-            "source files, config files, etc."
+            "source files, config files, etc. Set overwrite=true to replace existing files."
         )
 
     @property
@@ -33,7 +33,17 @@ class WriteFileTool(BaseTool):
                 },
                 "overwrite": {
                     "type": "boolean",
-                    "description": "If true, overwrite existing file. Default false.",
+                    "description": (
+                        "If true, overwrite existing file without error. "
+                        "If false (default), fails if file exists. "
+                        "Use true when you want to completely replace a file's content."
+                    ),
+                    "default": False,
+                },
+                "create_dirs": {
+                    "type": "boolean",
+                    "description": "Create parent directories if they don't exist (default: True).",
+                    "default": True,
                 },
             },
             "required": ["path", "content"],
@@ -57,7 +67,7 @@ class WriteFileTool(BaseTool):
         else:
             return f"Create new file: {path}"
 
-    def execute(self, path: str, content: str, overwrite: bool = False, **kwargs) -> str:
+    def execute(self, path: str, content: str, overwrite: bool = False, create_dirs: bool = True, **kwargs) -> str:
         filepath = self.resolve_path(path)
 
         existed = filepath.exists()
@@ -65,15 +75,28 @@ class WriteFileTool(BaseTool):
         if existed and not overwrite:
             raise ToolError(
                 f"File already exists: {filepath}\n"
-                f"Set overwrite=true to replace it."
+                f"Set overwrite=true to replace it, or use edit_file to modify specific parts."
             )
 
-        # Create parent directories
-        filepath.parent.mkdir(parents=True, exist_ok=True)
+        # Create parent directories if requested
+        if create_dirs:
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+        elif not filepath.parent.exists():
+            raise ToolError(f"Parent directory does not exist: {filepath.parent}")
 
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(content)
 
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-        action = "Overwrote" if existed and overwrite else "Created"
-        return f"{action} file: {filepath} ({line_count} lines)"
+        
+        if existed and overwrite:
+            action = "Overwrote"
+            detail = f" (replaced {line_count} lines)"
+        elif existed:
+            action = "Modified"
+            detail = f" ({line_count} lines)"
+        else:
+            action = "Created"
+            detail = f" ({line_count} lines)"
+        
+        return f"{action} file: {filepath}{detail}"

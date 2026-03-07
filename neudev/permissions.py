@@ -22,14 +22,16 @@ _PERMISSION_PROMPT = (
 def normalize_permission_choice(choice: str | None) -> str | None:
     """Return a normalized permission scope for a user-entered choice."""
     raw = str(choice or "").strip().lower()
-    if raw in {"y", "yes", "once"}:
+    if raw in {"y", "yes", "once", "1"}:
         return PERMISSION_CHOICE_ONCE
-    if raw in {"n", "no", "deny"}:
+    if raw in {"n", "no", "deny", "4"}:
         return PERMISSION_CHOICE_DENY
-    if raw in {"a", "always", "tool"}:
+    if raw in {"a", "always", "tool", "2"}:
         return PERMISSION_CHOICE_TOOL
-    if raw in {"all", "always all"}:
+    if raw in {"all", "always all", "3"}:
         return PERMISSION_CHOICE_ALL
+    if raw == "5":
+        return PERMISSION_CHOICE_DENY  # Stop/deny
     return None
 
 

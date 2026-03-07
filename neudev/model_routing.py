@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-LEGACY_DEFAULT_MODEL = "qwen3.5:0.8b"
+LEGACY_DEFAULT_MODEL = "qwen3:latest"  # Current recommended default model
+
+
+# Keep backward compatibility for old qwen3.5 references
 
 
 @dataclass(frozen=True)
@@ -128,7 +131,7 @@ MODEL_RULES: list[tuple[str, ModelTraits]] = [
             role_label="Quick Edit Coder",
             coding=7.1,
             reasoning=5.8,
-            tool_use=4.6,
+            tool_use=0.0,
             chat_capable=True,
             supports_thinking=False,
             stable_thinking=False,
@@ -273,7 +276,12 @@ def should_enable_thinking(model_name: str, requested: bool) -> bool:
     return traits.supports_thinking and traits.stable_thinking
 
 
-def rank_models(models: list[dict], messages: list[dict], has_tools: bool) -> tuple[list[dict], str]:
+def rank_models(
+    models: list[dict],
+    messages: list[dict],
+    has_tools: bool,
+    gpu_vram_gb: int = 16,
+) -> tuple[list[dict], str]:
     """Rank installed models for the current task."""
     task = _classify_task(_latest_user_message(messages), has_tools)
     stack_tags = _detect_stack_tags(messages)
@@ -288,7 +296,14 @@ def rank_models(models: list[dict], messages: list[dict], has_tools: bool) -> tu
 
         enriched = dict(model)
         enriched["role"] = traits.role_label
-        enriched["score"] = round(_score_model_for_task(name, traits, task.task_type, has_tools, stack_tags), 3)
+        enriched["score"] = round(
+            _score_model_for_task(
+                name, traits, task.task_type, has_tools, stack_tags,
+                model_size_bytes=model.get("size", 0),
+                gpu_vram_gb=gpu_vram_gb,
+            ),
+            3,
+        )
         ranked.append(enriched)
 
     ranked.sort(
@@ -373,7 +388,18 @@ def _latest_user_message(messages: list[dict]) -> str:
 
 
 def _classify_task(user_text: str, has_tools: bool) -> TaskDecision:
+    """
+    Classify the task type using weighted keyword matching.
+
+    Improvements:
+    - Position-weighted scoring (earlier keywords matter more)
+    - Phrase boosting for multi-word indicators
+    - Hybrid task detection with confidence scoring
+    """
     text = user_text.lower()
+    words = text.split()
+
+    # Base keyword hits
     planning_hits = _keyword_hits(text, PLANNING_KEYWORDS)
     coding_hits = _keyword_hits(text, CODING_KEYWORDS)
     refactor_hits = _keyword_hits(text, REFACTOR_KEYWORDS)
@@ -381,37 +407,66 @@ def _classify_task(user_text: str, has_tools: bool) -> TaskDecision:
     quick_hits = _keyword_hits(text, QUICK_EDIT_KEYWORDS)
     search_hits = _keyword_hits(text, SEARCH_KEYWORDS)
 
-    if refactor_hits:
-        return TaskDecision("complex_refactor", "complex refactor and cross-file changes")
+    # Position-weighted bonus: keywords in first 5 words get 1.5x multiplier
+    first_words = set(words[:5])
+    position_bonus = {
+        "planning": sum(1.5 for w in first_words if w in PLANNING_KEYWORDS),
+        "coding": sum(1.5 for w in first_words if w in CODING_KEYWORDS),
+        "refactor": sum(1.5 for w in first_words if w in REFACTOR_KEYWORDS),
+        "debug": sum(1.5 for w in first_words if w in DEBUG_KEYWORDS),
+    }
 
-    if quick_hits:
-        return TaskDecision("quick_edit", "quick edits and small code changes")
+    # Phrase boosting: detect multi-word patterns
+    phrase_boost = 0.0
+    if "analyze" in text and ("build" in text or "implement" in text or "create" in text):
+        phrase_boost = 2.0  # Strong hybrid signal
+    elif "refactor" in text and ("improve" in text or "clean" in text):
+        phrase_boost = 1.5
+    elif "fix" in text and ("bug" in text or "issue" in text or "error" in text):
+        phrase_boost = 1.5
 
-    strongest_non_search = max(planning_hits, coding_hits, debug_hits, refactor_hits)
-    if search_hits and search_hits >= max(1, strongest_non_search):
-        return TaskDecision("code_search", "code search and repository navigation")
+    # Weighted scoring with position bonuses
+    scores: dict[str, float] = {
+        "complex_refactor": (refactor_hits * 2.0) + position_bonus["refactor"],
+        "quick_edit": quick_hits * 2.5,
+        "planning": (planning_hits * 1.5) + position_bonus["planning"],
+        "main_coding": (coding_hits * 1.2) + position_bonus["coding"],
+        "debugging": (debug_hits * 1.3) + position_bonus["debug"] + phrase_boost,
+        "code_search": search_hits * 1.0,
+    }
 
+    # Mixed planning+coding → dedicated hybrid type with phrase boost
     if planning_hits and coding_hits:
-        return TaskDecision("analysis_implementation", "deep analysis followed by implementation")
+        hybrid_score = (planning_hits + coding_hits) * 1.4 + phrase_boost
+        # Boost further if both appear in first 5 words
+        if position_bonus["planning"] > 0 and position_bonus["coding"] > 0:
+            hybrid_score += 3.0
+        scores["analysis_implementation"] = hybrid_score
+    elif phrase_boost > 0 and "analysis_implementation" not in scores:
+        # Apply phrase boost to most likely category
+        if planning_hits > coding_hits:
+            scores["planning"] += phrase_boost
+        elif coding_hits > 0:
+            scores["main_coding"] += phrase_boost
 
-    if planning_hits and (planning_hits >= debug_hits or ("analyze" in text or "understand" in text) and not debug_hits):
+    best_type = max(scores, key=scores.get)  # type: ignore[arg-type]
+    best_score = scores[best_type]
+
+    if best_score <= 0:
         if has_tools:
-            return TaskDecision("planning", "deep analysis and workspace reasoning")
-        return TaskDecision("planning", "planning and reasoning")
+            return TaskDecision("general", "tool-heavy workspace task")
+        return TaskDecision("general", "general assistant task")
 
-    if debug_hits:
-        return TaskDecision("debugging", "debugging and bug fixing")
-
-    if coding_hits:
-        return TaskDecision("main_coding", "code generation and editing")
-
-    if search_hits:
-        return TaskDecision("code_search", "code search and repository navigation")
-
-    if has_tools:
-        return TaskDecision("general", "tool-heavy workspace task")
-
-    return TaskDecision("general", "general assistant task")
+    REASON_MAP = {
+        "complex_refactor": "complex refactor and cross-file changes",
+        "quick_edit": "quick edits and small code changes",
+        "analysis_implementation": "deep analysis followed by implementation",
+        "planning": "deep analysis and workspace reasoning" if has_tools else "planning and reasoning",
+        "debugging": "debugging and bug fixing",
+        "main_coding": "code generation and editing",
+        "code_search": "code search and repository navigation",
+    }
+    return TaskDecision(best_type, REASON_MAP.get(best_type, "general task"))
 
 
 def _keyword_hits(text: str, keywords: set[str]) -> int:
@@ -424,6 +479,8 @@ def _score_model_for_task(
     task_type: str,
     has_tools: bool,
     stack_tags: tuple[str, ...],
+    model_size_bytes: int = 0,
+    gpu_vram_gb: int = 16,
 ) -> float:
     order = _task_preference_order(task_type, has_tools)
     index = _family_priority(traits.family, order)
@@ -451,6 +508,9 @@ def _score_model_for_task(
     score += _stack_bonus(traits.family, task_type, stack_tags, has_tools)
     if model_name.endswith(":latest"):
         score += 0.15
+
+    # VRAM-aware penalty: avoid loading models that consume >70% of GPU memory
+    score += _vram_penalty(model_size_bytes, gpu_vram_gb)
 
     return score
 
@@ -480,21 +540,40 @@ def _task_preference_order(task_type: str, has_tools: bool) -> tuple[str, ...]:
 
 
 def _task_trait_weights(task_type: str, has_tools: bool) -> tuple[float, float, float]:
+    """
+    Return trait weights (coding, reasoning, tool_use) for a task type.
+
+    Fix: Explicit parentheses to ensure correct ternary operator precedence.
+    Without parentheses, the expression `a if cond else b, c, d` is parsed as
+    `(a if cond else b), c, d` which returns wrong tuples.
+    """
     if task_type == "planning":
-        return 0.5, 1.8, 1.5 if has_tools else 0.4
+        return (0.5, 1.8, (1.5 if has_tools else 0.4))
     if task_type == "analysis_implementation":
-        return 1.7, 1.3, 1.1 if has_tools else 0.3
+        return (1.7, 1.3, (1.1 if has_tools else 0.3))
     if task_type == "main_coding":
-        return 1.9, 0.8, 0.8 if has_tools else 0.2
+        return (1.9, 0.8, (0.8 if has_tools else 0.2))
     if task_type == "complex_refactor":
-        return 1.7, 1.5, 0.8 if has_tools else 0.2
+        return (1.7, 1.5, (0.8 if has_tools else 0.2))
     if task_type == "debugging":
-        return 1.5, 1.4, 1.0 if has_tools else 0.3
+        return (1.5, 1.4, (1.0 if has_tools else 0.3))
     if task_type == "quick_edit":
-        return 1.4, 0.6, 0.7 if has_tools else 0.0
+        return (1.4, 0.6, (0.7 if has_tools else 0.0))
     if task_type == "code_search":
-        return 0.9, 1.4, 1.7 if has_tools else 0.3
-    return 1.0, 1.2, 1.2 if has_tools else 0.0
+        return (0.9, 1.4, (1.7 if has_tools else 0.3))
+    return (1.0, 1.2, (1.2 if has_tools else 0.0))
+
+
+def _vram_penalty(model_size_bytes: int, gpu_vram_gb: int = 16) -> float:
+    """Penalize models that would consume too much GPU memory."""
+    if model_size_bytes <= 0:
+        return 0.0
+    model_gb = model_size_bytes / (1024 ** 3)
+    if model_gb > gpu_vram_gb * 0.7:
+        return -8.0
+    if model_gb > gpu_vram_gb * 0.5:
+        return -3.0
+    return 0.0
 
 
 def _family_priority(family: str, order: tuple[str, ...]) -> int | None:

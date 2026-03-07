@@ -26,9 +26,10 @@ SYSTEM_PROMPT = """You are NeuDev, an advanced AI coding agent. You help users b
 You have access to powerful tools for file system operations:
 - **read_file**: Read file contents with optional line ranges
 - **read_files_batch**: Read multiple files in one call
-- **write_file**: Create new files or overwrite existing ones
-- **edit_file**: Edit files using find/replace
-- **smart_edit_file**: Edit files with normalized matching fallbacks
+- **write_file**: Create new files or overwrite existing ones (use overwrite=true to replace)
+- **edit_file**: Edit files using exact find/replace
+- **smart_edit_file**: Edit files with normalized/fuzzy matching fallbacks
+- **find_replace**: Find and replace text across multiple files (supports regex)
 - **python_ast_edit**: Replace Python symbols by AST location
 - **js_ts_symbol_edit**: Replace JavaScript/TypeScript symbols by structural lookup
 - **delete_file**: Delete files
@@ -41,6 +42,11 @@ You have access to powerful tools for file system operations:
 - **changed_files_diagnostics**: Run targeted diagnostics only for changed files
 - **git_diff_review**: Review local git changes
 - **file_outline**: View code structure (classes, functions)
+- **web_search**: Search the web for documentation, error solutions, API references
+- **url_fetch**: Fetch and extract text content from a URL
+- **patch_file**: Apply unified diff patches to files
+- **dependency_install**: Install project dependencies (auto-detects pip, npm, cargo, etc.)
+- **project_init**: Scaffold new project structures (Python, Node.js, React)
 
 ## How to Work
 1. **Understand First**: Read the user's request carefully. Ask clarifying questions if needed.
@@ -50,6 +56,51 @@ You have access to powerful tools for file system operations:
 5. **Verify**: After changes, verify they work (e.g., run tests, check syntax).
 6. **Report**: Summarize what you did and suggest next steps or improvements.
 
+## Tool Selection Strategy
+Choose tools based on your task type for optimal results:
+
+**For debugging tasks** (errors, bugs, issues):
+1. grep_search → Find error messages in code
+2. read_file → Examine relevant files  
+3. diagnostics → Run tests/lint to confirm issue
+4. edit_file or smart_edit_file → Fix the problem
+5. run_command → Verify the fix works
+
+**For coding tasks** (new features, implementations):
+1. list_directory → Understand project structure
+2. read_file or file_outline → Review existing code
+3. write_file → Create new files (use overwrite=true to replace existing)
+4. run_command → Test your changes
+5. diagnostics → Ensure code quality
+
+**For refactoring tasks** (restructuring, renaming):
+1. symbol_search → Find all usages across the repo
+2. read_files_batch → Review all affected files
+3. find_replace → Rename across multiple files (best for simple text replacement)
+4. patch_file → Apply structured changes (best for multi-region edits)
+5. python_ast_edit or js_ts_symbol_edit → Symbol-level refactors
+6. diagnostics → Verify nothing broke
+
+**For research tasks** (documentation, API lookup):
+1. web_search → Find external information and solutions
+2. url_fetch → Read documentation from URLs
+3. read_file → Check existing implementations
+4. grep_search → Search for related patterns in codebase
+
+**For dependency management**:
+1. dependency_install → Install all dependencies or add new packages (auto-detects manager)
+2. run_command → Verify installation with package-specific commands
+
+**For new projects**:
+1. project_init → Scaffold standard project structure (Python, Node.js, React)
+2. dependency_install → Install the created project's dependencies
+
+**For bulk text replacement**:
+1. grep_search → First, find where the text appears
+2. find_replace → Replace across multiple files at once (supports regex)
+3. read_files_batch → Verify the changes
+4. diagnostics → Ensure nothing broke
+
 ## Rules
 - Always read existing files before editing them
 - Explain what you're doing and why
@@ -58,6 +109,9 @@ You have access to powerful tools for file system operations:
 - If the user explicitly changes the framework, design direction, or coding style, adopt it for this task and let project memory refresh silently
 - Use `symbol_search` when the task mentions a function, class, or method and you need fast repo navigation
 - Prefer `python_ast_edit` or `js_ts_symbol_edit` for symbol-level refactors over brittle text replacement
+- Prefer `patch_file` for multi-region edits instead of multiple edit_file calls
+- Prefer `smart_edit_file` when exact text matching fails
+- Use `web_search` and `url_fetch` when you need external information not in the workspace
 - Prefer `changed_files_diagnostics` for quick verification after edits and `git_diff_review` before summarizing larger changes
 - When the workspace has frontend/backend, mobile/backend, or multiple components, identify the affected components and inspect the boundary files before editing
 - Determine the active stack and component from workspace context before editing; inspect the nearest package/config/entry files first
@@ -145,6 +199,11 @@ class Agent:
         self.last_plan_items: list[str] = []
         self.last_plan_conventions: list[str] = []
         self.last_plan_progress: list[dict[str, str]] = []
+        
+        # Self-correction: track consecutive tool failures
+        self._consecutive_failures: dict[str, int] = {}
+        self._failure_suggestions: list[str] = []
+        
         self._init_system_prompt()
 
     def _build_system_prompt(self) -> str:
@@ -168,6 +227,127 @@ class Agent:
             self.conversation[0]["content"] = system_content
         else:
             self.conversation.insert(0, {"role": "system", "content": system_content})
+
+    def _prune_conversation(self, messages: list[dict], max_messages: int = None) -> list[dict]:
+        """
+        Prune conversation to prevent context overflow on long sessions.
+        
+        Keeps system prompt + last N messages. Summarizes old context implicitly
+        by removing it (the model retains understanding from recent messages).
+        
+        Args:
+            messages: Full conversation history
+            max_messages: Maximum messages to keep (default: config.max_context_messages)
+            
+        Returns:
+            Pruned conversation list
+        """
+        if max_messages is None:
+            max_messages = self.config.max_context_messages
+            
+        if len(messages) <= max_messages:
+            return messages
+        
+        # Keep system prompt(s) - there should typically be only one
+        system_messages = [m for m in messages if m.get("role") == "system"]
+        
+        # Keep the most recent non-system messages
+        non_system = [m for m in messages if m.get("role") != "system"]
+        recent = non_system[-max_messages:] if len(non_system) > max_messages else non_system
+        
+        # Combine: system messages first, then recent conversation
+        return system_messages + recent
+
+    def _track_tool_failure(self, tool_name: str, error: str) -> None:
+        """
+        Track consecutive failures for a tool to enable self-correction.
+        
+        Args:
+            tool_name: Name of the failed tool
+            error: Error message from the failure
+        """
+        self._consecutive_failures[tool_name] = (
+            self._consecutive_failures.get(tool_name, 0) + 1
+        )
+        
+        # Generate suggestion after 2 consecutive failures
+        if self._consecutive_failures[tool_name] >= 2:
+            suggestion = self._get_alternative_tool_suggestion(tool_name, error)
+            if suggestion and suggestion not in self._failure_suggestions:
+                self._failure_suggestions.append(suggestion)
+
+    def _reset_tool_failure(self, tool_name: str) -> None:
+        """
+        Reset failure count on successful tool execution.
+        
+        Args:
+            tool_name: Name of the successful tool
+        """
+        self._consecutive_failures.pop(tool_name, None)
+        # Clear related suggestions
+        self._failure_suggestions = []
+
+    def _get_alternative_tool_suggestion(self, tool_name: str, error: str) -> str | None:
+        """
+        Suggest alternative tools after repeated failures.
+        
+        Args:
+            tool_name: Name of the failing tool
+            error: Error message
+            
+        Returns:
+            Suggestion string or None
+        """
+        alternatives = {
+            "edit_file": (
+                "The exact text matching failed. Try smart_edit_file for fuzzy matching, "
+                "or use write_file to rewrite the entire file, or patch_file for structured changes."
+            ),
+            "grep_search": (
+                "Text search didn't find results. Try symbol_search for code symbols, "
+                "or search_files to locate files by name pattern."
+            ),
+            "run_command": (
+                "Command execution failed. Try checking if the command exists with 'which <cmd>' "
+                "or 'command -v <cmd>' first, or verify the working directory is correct."
+            ),
+            "read_file": (
+                "File not found. Try search_files to locate the correct file path first, "
+                "or list_directory to see available files in the directory."
+            ),
+            "python_ast_edit": (
+                "AST-based edit failed. The symbol may not exist or has a different name. "
+                "Try symbol_search first to verify the exact symbol name and location."
+            ),
+            "js_ts_symbol_edit": (
+                "Symbol edit failed. Try symbol_search to verify the symbol exists, "
+                "or use edit_file with exact text matching instead."
+            ),
+        }
+        
+        base_suggestion = alternatives.get(tool_name)
+        if not base_suggestion:
+            return None
+        
+        # Add error-specific context
+        error_context = ""
+        if "not found" in error.lower() or "does not exist" in error.lower():
+            error_context = " The target was not found - verify it exists first."
+        elif "permission" in error.lower() or "denied" in error.lower():
+            error_context = " Permission was denied - ensure you have the required access."
+        elif "timeout" in error.lower():
+            error_context = " Operation timed out - try a smaller change or increase timeout."
+        
+        return base_suggestion + error_context
+
+    def _get_failure_suggestions(self) -> list[str]:
+        """Get accumulated failure suggestions for inclusion in prompts."""
+        return self._failure_suggestions.copy()
+
+    def _clear_failure_history(self) -> None:
+        """Clear all failure tracking (called after successful turn completion)."""
+        self._consecutive_failures.clear()
+        self._failure_suggestions.clear()
 
     def process_message(
         self,
@@ -200,6 +380,10 @@ class Agent:
             self.refresh_context()
         turn_action_start = len(self.session.actions)
         working_conversation = list(self.conversation)
+        
+        # Prune conversation to prevent context overflow on long sessions
+        working_conversation = self._prune_conversation(working_conversation)
+        
         if workspace_changes and on_workspace_change:
             on_workspace_change(workspace_changes)
         if workspace_changes:
@@ -208,6 +392,17 @@ class Agent:
                 "content": self._format_workspace_change_message(workspace_changes),
             })
         working_conversation.append({"role": "user", "content": user_message})
+        
+        # Add failure suggestions to context if any
+        failure_suggestions = self._get_failure_suggestions()
+        if failure_suggestions:
+            suggestion_text = "\n\n## Recent Tool Failures and Suggestions\n" + "\n".join(
+                f"- {s}" for s in failure_suggestions
+            )
+            working_conversation.append({
+                "role": "system",
+                "content": suggestion_text,
+            })
         self.last_agent_team = None
         self.last_review_notes = ""
         self.last_plan_items = []
@@ -309,6 +504,10 @@ class Agent:
             response=final_response,
         )
         self._persist_turn_state(working_conversation)
+        
+        # Clear failure history after successful turn completion
+        self._clear_failure_history()
+        
         return final_response
 
     def _execute_tool(self, name: str, args: dict, event_callback=None, stop_event=None) -> str:
@@ -419,6 +618,8 @@ class Agent:
                 if fallback_result is not None:
                     return fallback_result
             error_result = f"Tool Error ({name}): {e}"
+            # Track failure for self-correction
+            self._track_tool_failure(name, str(e))
             if event_callback:
                 event_callback(
                     name,
@@ -436,6 +637,8 @@ class Agent:
             return error_result
         except Exception as e:
             error_result = f"Unexpected Error ({name}): {type(e).__name__}: {e}"
+            # Track failure for self-correction
+            self._track_tool_failure(name, str(e))
             if event_callback:
                 event_callback(
                     name,
@@ -452,7 +655,8 @@ class Agent:
                 )
             return error_result
 
-        # Track the action
+        # Track success - reset failure count
+        self._reset_tool_failure(name)
         action_map = {
             "read_file": "read",
             "read_files_batch": "read",

@@ -1,4 +1,4 @@
-"""Run shell command tool for NeuDev."""
+"""Run shell command tool for NeuDev - Enhanced with strict security."""
 
 from datetime import datetime
 import os
@@ -7,8 +7,11 @@ import shlex
 import shutil
 import subprocess
 import time
+from typing import Optional
 
 from neudev.tools.base import BaseTool, ToolError
+from neudev.security import SecretDetector, redact_secrets_in_payload
+from neudev.path_security import PathSecurityValidator
 
 
 # Commands that are blocked for safety
@@ -70,12 +73,22 @@ class CommandStopped(Exception):
 
 
 class RunCommandTool(BaseTool):
-    """Execute a shell command."""
+    """Execute a shell command with strict security controls."""
 
     def __init__(self) -> None:
         super().__init__()
         self.execution_mode = "permissive"
         self.allowed_commands = set(RESTRICTED_ALLOWED_COMMANDS)
+        self._secret_detector = SecretDetector()
+        self._path_validator: Optional[PathSecurityValidator] = None
+
+    def _get_path_validator(self) -> PathSecurityValidator:
+        """Lazy-initialize path validator."""
+        if self._path_validator is None and self.workspace:
+            self._path_validator = PathSecurityValidator(self.workspace)
+        elif self._path_validator is None:
+            self._path_validator = PathSecurityValidator(Path.cwd())
+        return self._path_validator
 
     def set_execution_mode(self, mode: str, *, extra_allowed_commands: list[str] | None = None) -> None:
         normalized = str(mode or "permissive").strip().lower()
@@ -139,7 +152,18 @@ class RunCommandTool(BaseTool):
         stop_event=None,
         **kwargs,
     ) -> str:
-        # Safety check
+        # Security check: Detect secrets in command
+        has_secrets, secret_msg = self._secret_detector.detect_secrets(command), None
+        if has_secrets:
+            summary = has_secrets.get_summary()
+            if summary.get("high_confidence", 0) > 0:
+                raise ToolError(
+                    f"⚠️  Security warning: Command contains {summary['total']} potential secret(s). "
+                    f"Types: {', '.join(summary['by_type'].keys())}. "
+                    "Remove sensitive data before executing."
+                )
+
+        # Safety check for dangerous commands
         cmd_lower = command.lower().strip()
         for blocked in BLOCKED_COMMANDS:
             if blocked in cmd_lower:
@@ -150,15 +174,44 @@ class RunCommandTool(BaseTool):
                 "Set NEUDEV_HOSTED_RUN_COMMAND_MODE=restricted or permissive to enable it."
             )
 
-        work_dir = self.resolve_directory(cwd, must_exist=True)
+        # Validate and resolve working directory
+        path_validator = self._get_path_validator()
+        if cwd:
+            try:
+                work_dir = path_validator.safe_resolve_path(cwd, must_exist=True)
+            except ValueError as e:
+                raise ToolError(f"Invalid working directory: {e}")
+        else:
+            work_dir = self.workspace or Path.cwd()
+
         if not work_dir.exists():
             raise ToolError(f"Working directory not found: {work_dir}")
+        if not work_dir.is_dir():
+            raise ToolError(f"Working directory is not a directory: {work_dir}")
 
+        # Prepare command for execution
         run_target: str | list[str] = command
-        use_shell = True
+        use_shell = False  # Default to no shell for security
+
         if self.execution_mode == "restricted":
             run_target = self._validate_restricted_command(command)
-            use_shell = False
+            use_shell = False  # Never use shell in restricted mode
+        elif self.execution_mode == "permissive":
+            # In permissive mode, still avoid shell=True when possible
+            # Only use shell for commands that require shell features
+            needs_shell = any(token in command for token in SHELL_CONTROL_TOKENS)
+            if needs_shell:
+                # Log warning about shell usage
+                use_shell = True
+            else:
+                # Parse command into tokens for safer execution
+                try:
+                    run_target = shlex.split(command, posix=os.name != "nt")
+                    if run_target:
+                        run_target = self._resolve_executable_tokens(run_target)
+                except ValueError:
+                    # If parsing fails, fall back to shell execution
+                    use_shell = True
 
         started_wall = datetime.now().strftime("%I:%M:%S %p")
         started_mono = time.monotonic()
@@ -233,28 +286,71 @@ class RunCommandTool(BaseTool):
         started_at: str = "",
         stop_event=None,
     ):
+        """
+        Execute subprocess with enhanced security controls.
+
+        Security features:
+        - No shell execution by default (shell=False)
+        - Environment variable sanitization
+        - Process group isolation
+        - Timeout enforcement
+        """
         if stop_event is not None and stop_event.is_set():
             raise CommandStopped(display_command)
+
+        # Prepare environment - remove potentially dangerous variables
+        env = os.environ.copy()
+        # Remove sensitive environment variables
+        sensitive_vars = [
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_ACCESS_KEY_ID",
+            "PRIVATE_KEY",
+            "SSH_PASSWORD",
+            "API_KEY",
+            "DATABASE_URL",
+        ]
+        for var in sensitive_vars:
+            env.pop(var, None)
+
         if progress_callback is None:
-            return subprocess.run(
+            # Simple execution without progress tracking
+            try:
+                result = subprocess.run(
+                    command,
+                    shell=shell,
+                    cwd=str(work_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    env=env,
+                    # Don't create new process group on Windows to avoid issues
+                    creationflags=subprocess.CREATE_NO_PROCESS_GROUP if os.name == "nt" else 0,
+                )
+                return result
+            except subprocess.TimeoutExpired:
+                raise
+            except FileNotFoundError:
+                raise
+            except OSError as e:
+                raise ToolError(f"Command execution failed: {e}")
+
+        # Execution with progress tracking
+        try:
+            process = subprocess.Popen(
                 command,
                 shell=shell,
                 cwd=str(work_dir),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
-                env=None,
+                env=env,
+                # Create process group for clean termination
+                preexec_fn=os.setsid if os.name != "nt" else None,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
             )
+        except OSError as e:
+            raise ToolError(f"Failed to start process: {e}")
 
-        process = subprocess.Popen(
-            command,
-            shell=shell,
-            cwd=str(work_dir),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=None,
-        )
         started_mono = time.monotonic()
         wait_announced = False
         last_update = 0.0
@@ -281,11 +377,24 @@ class RunCommandTool(BaseTool):
                                 "mode": "stop_requested",
                             }
                         )
-                    process.kill()
+                    # Kill entire process group
+                    try:
+                        if os.name != "nt":
+                            os.killpg(os.getpgid(process.pid), 9)
+                        else:
+                            process.kill()
+                    except (OSError, ProcessLookupError):
+                        pass
                     process.communicate()
                     raise CommandStopped(display_command)
                 if elapsed >= timeout:
-                    process.kill()
+                    try:
+                        if os.name != "nt":
+                            os.killpg(os.getpgid(process.pid), 9)
+                        else:
+                            process.kill()
+                    except (OSError, ProcessLookupError):
+                        pass
                     stdout, stderr = process.communicate()
                     raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
                 if elapsed < BACKGROUND_WAIT_THRESHOLD_SECONDS:

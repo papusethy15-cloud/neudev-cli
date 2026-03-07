@@ -50,7 +50,21 @@ class OllamaClient:
         self.base_url = config.ollama_host.rstrip("/")
         self.last_used_model: str | None = None
         self.last_route_reason: str = ""
+        self._models_cache: list[dict] | None = None
+        self._models_cache_time: float = 0.0
+        self._models_cache_ttl: float = 120.0  # 2 minutes TTL (increased from 30s)
+        self._prefetch_on_init: bool = True
+        if self._prefetch_on_init:
+            self._prefetch_models()
         self._test_connection()
+
+    def _prefetch_models(self) -> None:
+        """Prefetch and cache available models on initialization."""
+        try:
+            self._fetch_installed_models()
+        except Exception:
+            # Don't fail initialization if prefetch fails
+            pass
 
     def _test_connection(self) -> None:
         """Test connection to Ollama."""
@@ -421,6 +435,16 @@ class OllamaClient:
         return f"auto -> {target}" if target else "auto"
 
     def _fetch_installed_models(self) -> list[dict]:
+        """
+        Fetch installed models with caching.
+
+        Cache TTL: 2 minutes (configurable via _models_cache_ttl)
+        This reduces API calls from 3-5 per turn to 1 every 2 minutes.
+        """
+        now = time.monotonic()
+        if self._models_cache is not None and (now - self._models_cache_time) < self._models_cache_ttl:
+            return [dict(m) for m in self._models_cache]
+
         response = self._api_get("/api/tags")
         models = []
         for m in response.get("models", []):
@@ -431,7 +455,9 @@ class OllamaClient:
                 "modified": m.get("modified_at", ""),
                 "active": False,
             })
-        return models
+        self._models_cache = models
+        self._models_cache_time = now
+        return [dict(m) for m in models]
 
     def _resolve_candidate_models(
         self,

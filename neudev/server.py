@@ -19,7 +19,9 @@ from typing import Any, Callable, Iterator
 from neudev import __app_name__
 from neudev.agent import Agent
 from neudev.config import CONFIG_DIR, NeuDevConfig
+from neudev.health_check import create_health_checker, HealthStatus
 from neudev.llm import LLMError, OllamaClient
+from neudev.observability import get_logger, get_metrics, observe_tool, observe_model_request
 from neudev.permissions import (
     PERMISSION_CHOICE_ALL,
     PERMISSION_CHOICE_ONCE,
@@ -791,19 +793,32 @@ class NeuDevHTTPRequestHandler(BaseHTTPRequestHandler):
         try:
             path_only = self.path.split("?", 1)[0]
             if path_only == "/health" and method == "GET":
+                # Enhanced health check
+                health_checker = create_health_checker(
+                    ollama_host=self.server.service.base_config.ollama_host,
+                    workspace=self.server.service.default_workspace,
+                    session_store=str(self.server.service.storage_dir),
+                )
+                report = health_checker.check_all()
+
                 transports = ["sse"]
                 if self.server.websocket_port is not None:
                     transports.append("websocket")
-                self._send_json(
-                    HTTPStatus.OK,
-                    {
-                        "status": "ok",
-                        "service": __app_name__,
-                        "stream_transports": transports,
-                        "websocket_port": self.server.websocket_port,
-                        "websocket_path": DEFAULT_WEBSOCKET_PATH if self.server.websocket_port is not None else None,
-                    },
+
+                response_data = report.to_dict()
+                response_data["stream_transports"] = transports
+                response_data["websocket_port"] = self.server.websocket_port
+                response_data["websocket_path"] = DEFAULT_WEBSOCKET_PATH if self.server.websocket_port is not None else None
+
+                status_code = (
+                    HTTPStatus.OK
+                    if report.status == HealthStatus.HEALTHY
+                    else HTTPStatus.SERVICE_UNAVAILABLE
+                    if report.status == HealthStatus.UNHEALTHY
+                    else HTTPStatus.OK
                 )
+
+                self._send_json(status_code, response_data)
                 return
 
             if not self.server.service.authenticate(self.headers.get("Authorization")):

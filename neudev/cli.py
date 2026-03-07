@@ -104,6 +104,11 @@ SLASH_COMMANDS = [
     "/deny",
     "/queue",
     "/stop",
+    "/explain",
+    "/refactor",
+    "/test",
+    "/commit",
+    "/summarize",
 ]
 
 
@@ -451,51 +456,115 @@ def build_live_status_lines(trace: ExecutionTraceState) -> list[str]:
     with trace.lock:
         elapsed = trace.elapsed_seconds()
         phase_label = _phase_label(trace.current_phase)
-        spinner_frames = ["|", "/", "-", "\\"]
-        spinner = spinner_frames[int(elapsed * 5) % len(spinner_frames)]
-        headline = f"{spinner} {phase_label}"
-        if trace.current_detail:
-            headline += f" | {_truncate_cli_value(trace.current_detail, limit=72)}"
+
+        # Phase icon mapping with descriptive status
+        phase_icons = {
+            "UNDERSTAND": "🔍", "PLAN": "📋", "PRECHECK": "🔎",
+            "EXECUTE": "⚡", "REVIEW": "📝", "VERIFY": "✅",
+        }
+        icon = phase_icons.get(phase_label, "🔧")
+
+        # Descriptive phase status messages
+        phase_status = {
+            "UNDERSTAND": "Analyzing your request",
+            "PLAN": "Creating execution plan",
+            "PRECHECK": "Validating approach",
+            "EXECUTE": "Executing tasks",
+            "REVIEW": "Reviewing changes",
+            "VERIFY": "Verifying results",
+        }
+        status_text = phase_status.get(phase_label, "Processing")
+
+        total_tool_calls = sum(trace.tool_counts.values()) if trace.tool_counts else 0
+
+        # Step count and model display
+        model_text = trace.current_model or "pending selection"
+        headline = f"{icon} {phase_label}"
+        step_info = f"Step {total_tool_calls + 1}"
+        if trace.plan_total:
+            step_info += f"/{trace.plan_total}"
+        headline = f"{icon} {phase_label} | {step_info} | Model: {model_text}"
 
         lines = [f"[bold white]{headline}[/bold white]"]
-        model_text = trace.current_model or "pending selection"
-        lines.append(f"[muted]Model[/muted] [white]{model_text}[/white]")
-        lines.append(f"[muted]Elapsed[/muted] [white]{elapsed:.1f}s[/white]")
 
-        if trace.plan_total:
-            lines.append(
-                f"[muted]Plan[/muted] [white]{trace.plan_completed}/{trace.plan_total} completed[/white]"
-                + (
-                    f" [dim]| active: {_truncate_cli_value(trace.active_plan_item, limit=42)}[/dim]"
-                    if trace.active_plan_item
-                    else ""
-                )
-            )
+        # Status description
+        lines.append(f"  [dim]{status_text}...[/dim]")
 
+        # Current tool activity with clear icons and action description
         if trace.current_target:
-            lines.append(f"[muted]Target[/muted] [white]{_truncate_cli_value(trace.current_target, limit=72)}[/white]")
+            tool_icon = "🔧"
+            action_text = "Working on"
+            if trace.current_phase in ("understand", "planner"):
+                tool_icon = "📖"
+                action_text = "Reading"
+            elif trace.current_phase == "executor":
+                tool_icon = "⚡"
+                action_text = "Executing"
+            elif trace.current_phase == "reviewer":
+                tool_icon = "🔎"
+                action_text = "Reviewing"
+            elif trace.current_phase == "verify":
+                tool_icon = "✅"
+                action_text = "Verifying"
+            target = _truncate_cli_value(trace.current_target, limit=60)
+            lines.append(f"  {tool_icon} [white]{action_text}: {target}[/white]")
+        elif trace.current_detail and trace.current_detail != "Preparing execution trace.":
+            lines.append(f"  [dim]{trace.current_detail}[/dim]")
 
+        # Timing and tool count
+        timing_parts = [f"⏱️  {elapsed:.1f}s elapsed"]
+        if total_tool_calls > 0:
+            timing_parts.append(f"{total_tool_calls} tool(s) completed")
+        lines.append(f"  [dim]{' | '.join(timing_parts)}[/dim]")
+
+        # Plan progress bar
+        if trace.plan_total:
+            filled = int((trace.plan_completed / trace.plan_total) * 10)
+            bar = "█" * filled + "░" * (10 - filled)
+            plan_line = f"  📊 Plan: {bar} {trace.plan_completed}/{trace.plan_total} done"
+            if trace.active_plan_item:
+                plan_line += f" | [dim]{_truncate_cli_value(trace.active_plan_item, limit=42)}[/dim]"
+            lines.append(plan_line)
+
+        # Tool execution log (last few tools)
         if trace.tool_counts:
-            total_tool_calls = sum(trace.tool_counts.values())
-            lines.append(f"[muted]Tools[/muted] [white]{total_tool_calls} call(s)[/white]")
+            tool_parts = []
+            for name, count in sorted(trace.tool_counts.items()):
+                tool_parts.append(f"{name}×{count}")
+            lines.append(f"  🧰 [dim]{', '.join(tool_parts[:6])}[/dim]")
 
+        # Thinking / waiting status with more descriptive text
         if trace.latest_thinking:
-            lines.append(f"[muted]Thinking[/muted] [dim]{trace.latest_thinking}[/dim]")
+            lines.append(f"  💭 [dim italic]{trace.latest_thinking}[/dim italic]")
         elif trace.waiting_for_model:
-            lines.append("[muted]Thinking[/muted] [dim]Waiting for the model to return the next step...[/dim]")
+            model_status = "Waiting for model to decide next step"
+            if phase_label == "PLAN":
+                model_status = "Model is creating the execution plan"
+            elif phase_label == "EXECUTE":
+                model_status = "Model is determining the best tool to use"
+            elif phase_label == "REVIEW":
+                model_status = "Model is reviewing the changes"
+            lines.append(f"  💭 [dim italic]{model_status}...[/dim italic]")
 
+        # Draft response preview
         if trace.latest_response and not trace.waiting_for_model:
-            lines.append(f"[muted]Draft[/muted] [dim]{trace.latest_response}[/dim]")
+            lines.append(f"  📝 [dim]{trace.latest_response}[/dim]")
 
         return lines
 
 
 def build_live_status_panel(trace: ExecutionTraceState) -> Panel:
     """Build the live status panel renderable."""
+    phase_label = _phase_label(trace.current_phase)
+    phase_icons = {
+        "UNDERSTAND": "🔍", "PLAN": "📋", "PRECHECK": "🔎",
+        "EXECUTE": "⚡", "REVIEW": "📝", "VERIFY": "✅",
+    }
+    icon = phase_icons.get(phase_label, "🔧")
     return Panel(
         "\n".join(build_live_status_lines(trace)),
-        border_style="grey50",
-        title="[grey62]Live Status[/grey62]",
+        border_style="cyan",
+        title=f"[bold cyan]{icon} {phase_label}[/bold cyan]",
         padding=(0, 1),
         expand=False,
         width=min(console.width, 96),
@@ -529,10 +598,14 @@ def _run_live_trace_panel(trace: ExecutionTraceState, runner) -> None:
 
 def build_trace_summary_lines(trace: ExecutionTraceState) -> list[str]:
     """Build compact summary lines for a completed turn."""
-    lines = [f"[bold white]Elapsed[/bold white] {trace.elapsed_seconds():.1f}s"]
+    lines = [f"[bold white]⏱️  Elapsed[/bold white] {trace.elapsed_seconds():.1f}s"]
 
     if trace.phases:
         labels = []
+        phase_icons = {
+            "understand": "🔍", "planner": "📋", "reviewer-pre": "🔎",
+            "executor": "⚡", "reviewer": "📝", "verify": "✅",
+        }
         for phase, _model in trace.phases:
             label = {
                 "understand": "UNDERSTAND",
@@ -542,31 +615,63 @@ def build_trace_summary_lines(trace: ExecutionTraceState) -> list[str]:
                 "reviewer": "REVIEW",
                 "verify": "VERIFY",
             }.get(phase, phase.upper())
-            if not labels or labels[-1] != label:
-                labels.append(label)
-        lines.append(f"[bold white]Flow[/bold white] {' -> '.join(labels)}")
+            icon = phase_icons.get(phase, "•")
+            if not labels or labels[-1] != f"{icon} {label}":
+                labels.append(f"{icon} {label}")
+        lines.append(f"[bold white]🔄 Flow[/bold white] {' → '.join(labels)}")
 
     if trace.plan_total:
-        plan_line = f"[bold white]Plan[/bold white] {trace.plan_completed}/{trace.plan_total} completed"
+        filled = int((trace.plan_completed / trace.plan_total) * 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        plan_line = f"[bold white]📊 Plan[/bold white] {bar} {trace.plan_completed}/{trace.plan_total} completed"
         if trace.active_plan_item:
-            plan_line += f" | active: {_truncate_cli_value(trace.active_plan_item, limit=56)}"
+            plan_line += f" | [dim]{_truncate_cli_value(trace.active_plan_item, limit=56)}[/dim]"
         lines.append(plan_line)
 
     if trace.tool_counts:
-        tool_parts = [f"{name} x{count}" for name, count in sorted(trace.tool_counts.items())]
-        lines.append(f"[bold white]Tools[/bold white] {', '.join(tool_parts[:5])}")
+        tool_parts = [f"{name} ×{count}" for name, count in sorted(trace.tool_counts.items())]
+        lines.append(f"[bold white]🧰 Tools[/bold white] {', '.join(tool_parts[:5])}")
 
+    # Enhanced change summary with diff preview
     if any(trace.workspace_delta_counts.values()):
+        delta_icons = {"created": "✨", "modified": "📝", "deleted": "🗑️"}
         delta_parts = [
-            f"{count} {label}"
+            f"{delta_icons.get(label, '•')} {count} {label}"
             for label, count in trace.workspace_delta_counts.items()
             if count
         ]
-        lines.append(f"[bold white]Workspace Delta[/bold white] {', '.join(delta_parts)}")
+
+        # Calculate total changes
+        total_changes = sum(trace.workspace_delta_counts.values())
+        change_summary = f"[bold white]📂 Changes[/bold white] {', '.join(delta_parts)}"
+
+        # Add change count badge
+        if total_changes > 0:
+            change_summary += f" [dim]({total_changes} file{'s' if total_changes > 1 else ''} changed)[/dim]"
+
+        lines.append(change_summary)
+
+        # Add diff preview for changed files
+        if trace.changed_targets:
+            preview_files = trace.changed_targets[:3]  # Show first 3 changed files
+            for file_path in preview_files:
+                rel_path = _make_workspace_relative(file_path, "")
+                # Determine change type
+                if file_path in trace.workspace_delta_counts.get("created", []):
+                    change_type = "[success]+new[/success]"
+                elif file_path in trace.workspace_delta_counts.get("deleted", []):
+                    change_type = "[error]-deleted[/error]"
+                else:
+                    change_type = "[warning]~modified[/warning]"
+                lines.append(f"    {change_type} [dim]{_truncate_cli_value(rel_path, limit=60)}[/dim]")
 
     targets = trace.changed_targets or trace.touched_targets
     if targets:
-        lines.append(f"[bold white]Touched[/bold white] {', '.join(_truncate_cli_value(item, limit=32) for item in targets[:4])}")
+        lines.append(f"[bold white]📍 Touched[/bold white] {', '.join(_truncate_cli_value(item, limit=32) for item in targets[:4])}")
+
+    # Model routing explanation
+    if trace.current_model:
+        lines.append(f"[bold white]🧭 Model[/bold white] {trace.current_model}")
 
     return lines
 
@@ -604,24 +709,30 @@ def build_prompt_session() -> PromptSession:
         return PromptSession(completer=completer, style=pt_style)
 
 
-def _format_permission_panel_body(message: str, *, hosted: bool = False) -> str:
+def _format_permission_panel_body(message: str, *, hosted: bool = False, countdown: int | None = None) -> str:
     """Render a readable approval card for the main prompt loop."""
     stop_hint = (
         "cancel the blocked hosted turn"
         if hosted
-        else "stop the active task and deny this request"
+        else "stop task & deny"
     )
+
+    countdown_display = ""
+    if countdown is not None and countdown > 0:
+        countdown_display = f" [yellow]({countdown}s timeout)[/yellow]"
+
     lines = [
         f"[bold white]{message}[/bold white]",
         "",
-        "[bold bright_yellow]Reply in the main prompt[/bold bright_yellow]",
-        "  [success]y[/success] or [success]/approve[/success]        approve once",
-        "  [success]a[/success] or [success]/approve tool[/success]   approve this tool for the session",
-        "  [success]all[/success] or [success]/approve all[/success]  approve all destructive actions",
-        "  [error]n[/error] or [error]/deny[/error]          deny",
-        f"  [warning]/stop[/warning]                        {stop_hint}",
+        "[bold bright_yellow]Choose an option:[/bold bright_yellow]",
         "",
-        "[dim]The active task is paused until you choose one of the options above.[/dim]",
+        "  [success][1][/success] ✅ Allow once            [dim](y, /approve)[/dim]",
+        "  [success][2][/success] 🔄 Allow this tool       [dim](a, /approve tool)[/dim]",
+        "  [success][3][/success] 🟢 Allow all for session  [dim](all, /approve all)[/dim]",
+        "  [error][4][/error] ❌ Deny                  [dim](n, /deny)[/dim]",
+        f"  [warning][5][/warning] 🛑 {stop_hint:24s}  [dim](/stop)[/dim]",
+        "",
+        f"[dim italic]Enter choice (1-5) or use the shortcut commands above.{countdown_display}[/dim italic]",
     ]
     return "\n".join(lines)
 
@@ -660,20 +771,45 @@ class InteractivePermissionManager(PermissionManager):
                 raise RuntimeError("Another permission request is already pending.")
             self._pending_request = request
 
+        # Show permission panel with countdown
         console.print()
-        console.print(
-            Panel(
-                _format_permission_panel_body(message),
+        permission_timeout = 60  # 60 second timeout
+        start_time = time.monotonic()
+
+        # Use Live panel for countdown updates
+        from rich.live import Live
+
+        def get_permission_panel():
+            elapsed = int(time.monotonic() - start_time)
+            remaining = max(0, permission_timeout - elapsed)
+            return Panel(
+                _format_permission_panel_body(message, countdown=remaining if remaining > 0 else None),
                 title=f"[yellow]⚠️  Permission Required: {tool_name}[/yellow]",
                 border_style="yellow",
                 padding=(1, 2),
                 expand=False,
                 width=min(console.width, 86),
             )
-        )
-        console.print()
 
-        request.event.wait()
+        with Live(get_permission_panel(), console=console, refresh_per_second=1, transient=False) as live:
+            # Wait for response with timeout
+            while not request.event.is_set():
+                elapsed = time.monotonic() - start_time
+                if elapsed >= permission_timeout:
+                    # Auto-deny on timeout
+                    request.decision = PERMISSION_CHOICE_DENY
+                    request.event.set()
+                    live.update(
+                        Panel(
+                            f"[red]⏱️  Timeout - permission request denied after {permission_timeout}s[/red]",
+                            title="[red]⚠️  Permission Timeout[/red]",
+                            border_style="red",
+                        )
+                    )
+                    break
+                request.event.wait(timeout=0.5)
+                live.update(get_permission_panel())
+
         decision = request.decision or PERMISSION_CHOICE_DENY
         with self._pending_lock:
             if self._pending_request is request:
@@ -817,8 +953,112 @@ def handle_help() -> None:
     table.add_row("/version", "Show version info")
     table.add_row("/close", "Close the current remote session")
     table.add_row("/exit", "Disconnect from the current session")
+    table.add_row("/explain", "Explain selected code or file")
+    table.add_row("/refactor", "Refactor selected code")
+    table.add_row("/test", "Generate tests for selected code")
+    table.add_row("/commit", "Review and commit changes")
+    table.add_row("/summarize", "Summarize conversation history")
     console.print(table)
     console.print()
+
+
+def handle_explain(agent, arg: str | None) -> None:
+    """Handle /explain command - explain selected code or file."""
+    if not arg:
+        console.print("\n  [warning]⚠️  Usage: /explain <file_or_code>[/warning]\n")
+        console.print("  [dim]Example: /explain neudev/agent.py[/dim]\n")
+        return
+
+    console.print(f"\n  [info]🔍 Explaining: {arg}[/info]\n")
+    console.print("  [dim]NeuDev will analyze the selected code and provide a detailed explanation.[/dim]\n")
+    console.print("  [dim]This is a shortcut for: \"Please explain in detail how this code works: {arg}\"[/dim]\n")
+
+
+def handle_refactor(agent, arg: str | None) -> None:
+    """Handle /refactor command - refactor selected code."""
+    if not arg:
+        console.print("\n  [warning]⚠️  Usage: /refactor <file_or_code> [goal][/warning]\n")
+        console.print("  [dim]Example: /refactor neudev/agent.py --improve readability[/dim]\n")
+        return
+
+    goal = arg.split(" --", 1)[-1] if " --" in arg else "improve code quality"
+    target = arg.split(" --")[0].strip()
+
+    console.print(f"\n  [info]🔧 Refactoring: {target}[/info]\n")
+    console.print(f"  [dim]Goal: {goal}[/dim]\n")
+    console.print("  [dim]This is a shortcut for: \"Refactor this code to {goal}: {target}\"[/dim]\n")
+
+
+def handle_test(agent, arg: str | None) -> None:
+    """Handle /test command - generate tests for selected code."""
+    if not arg:
+        console.print("\n  [warning]⚠️  Usage: /test <file_or_code> [test_type][/warning]\n")
+        console.print("  [dim]Example: /test neudev/agent.py --unit[/dim]\n")
+        return
+
+    test_type = arg.split(" --", 1)[-1] if " --" in arg else "unit"
+    target = arg.split(" --")[0].strip()
+
+    console.print(f"\n  [info]🧪 Generating {test_type} tests for: {target}[/info]\n")
+    console.print("  [dim]This is a shortcut for: \"Generate comprehensive {test_type} tests for: {target}\"[/dim]\n")
+
+
+def handle_commit(agent, arg: str | None) -> None:
+    """Handle /commit command - review and commit changes."""
+    console.print("\n  [info]📝 Reviewing changes for commit...[/info]\n")
+
+    # Try to get git diff
+    try:
+        from neudev.tools.git_diff_review import GitDiffReviewTool
+        from neudev.tools.base import ToolError
+
+        tool = GitDiffReviewTool()
+        tool.bind_workspace(agent.workspace)
+
+        diff_result = tool.execute()
+        if diff_result and "no changes" not in diff_result.lower():
+            console.print(Panel(
+                diff_result[:2000] + ("..." if len(diff_result) > 2000 else ""),
+                title="[bold]Git Diff[/bold]",
+                border_style="bright_blue",
+            ))
+            console.print("\n  [dim]This is a shortcut for: \"Review my changes and prepare a commit message\"[/dim]\n")
+        else:
+            console.print("  [dim]📭 No local git changes to review.[/dim]\n")
+    except (ImportError, ToolError) as e:
+        console.print(f"  [dim]📭 Git diff not available: {e}[/dim]\n")
+        console.print("  [dim]This is a shortcut for: \"Review my changes and prepare a commit message\"[/dim]\n")
+
+
+def handle_summarize(agent, arg: str | None) -> None:
+    """Handle /summarize command - summarize conversation history."""
+    console.print("\n  [info]📋 Summarizing conversation...[/info]\n")
+
+    # Get recent conversation
+    recent_messages = agent.conversation[-10:] if len(agent.conversation) > 10 else agent.conversation
+
+    summary_parts = []
+    user_messages = sum(1 for m in recent_messages if m.get("role") == "user")
+    assistant_messages = sum(1 for m in recent_messages if m.get("role") == "assistant")
+
+    summary_parts.append(f"**Recent Conversation Summary**:")
+    summary_parts.append(f"- {user_messages} user messages")
+    summary_parts.append(f"- {assistant_messages} assistant responses")
+
+    # Count tool usage
+    tool_count = sum(1 for m in recent_messages if m.get("role") == "tool")
+    if tool_count:
+        summary_parts.append(f"- {tool_count} tool calls")
+
+    # Get action summary
+    if agent.session.actions:
+        recent_actions = agent.session.actions[-5:]
+        action_types = set(a.action for a in recent_actions)
+        if action_types:
+            summary_parts.append(f"- Actions: {', '.join(action_types)}")
+
+    console.print("\n".join(summary_parts))
+    console.print("\n  [dim]This is a shortcut for: \"Summarize what we've discussed so far\"[/dim]\n")
 
 
 def build_plan_panel_content(
@@ -1008,6 +1248,35 @@ def _tool_activity_style(tool_name: str) -> tuple[str, str]:
     return TOOL_ACTIVITY_META.get(tool_name, ("TOOL", "tool"))
 
 
+def _make_workspace_relative(path: str, workspace: str = "") -> str:
+    """Convert absolute path to workspace-relative path for display."""
+    if not path:
+        return path
+
+    # If already relative, return as-is
+    if not os.path.isabs(path):
+        return path
+
+    # Try to make relative to workspace
+    if workspace:
+        try:
+            rel = os.path.relpath(path, workspace)
+            # Only use relative path if it's shorter and doesn't start with ..
+            if not rel.startswith("..") and len(rel) < len(path):
+                return rel
+        except (ValueError, OSError):
+            pass
+
+    # Try to make relative to home directory
+    home = os.path.expanduser("~")
+    if path.startswith(home):
+        rel = path.replace(home, "~", 1)
+        if len(rel) < len(path):
+            return rel
+
+    return path
+
+
 def render_tool_event(
     tool_name: str,
     payload: dict | None,
@@ -1019,6 +1288,8 @@ def render_tool_event(
     _record_trace_tool_event(trace, tool_name, payload)
     event_type = str(payload.get("event", "start"))
     activity_label, activity_style = _tool_activity_style(tool_name)
+
+    # Get target and convert to workspace-relative path
     target = (
         payload.get("target")
         or payload.get("path")
@@ -1026,6 +1297,14 @@ def render_tool_event(
         or payload.get("directory")
         or ""
     )
+
+    # Convert file paths to workspace-relative for better readability
+    file_tools = {"read_file", "write_file", "edit_file", "smart_edit_file", "delete_file",
+                  "python_ast_edit", "js_ts_symbol_edit", "file_outline"}
+    if tool_name in file_tools and target:
+        workspace = trace.custom_fields.get("workspace", "") if trace else ""
+        target = _make_workspace_relative(str(target), workspace)
+
     target_text = _truncate_cli_value(str(target).strip() or tool_name, limit=92)
 
     if event_type == "progress":
@@ -2328,6 +2607,16 @@ def run_local_agent_loop(agent: Agent, config: NeuDevConfig, *, runtime_mode: st
             elif cmd == "/thinking":
                 handle_thinking(config)
                 agent.config.show_thinking = config.show_thinking
+            elif cmd == "/explain":
+                handle_explain(agent, arg)
+            elif cmd == "/refactor":
+                handle_refactor(agent, arg)
+            elif cmd == "/test":
+                handle_test(agent, arg)
+            elif cmd == "/commit":
+                handle_commit(agent, arg)
+            elif cmd == "/summarize":
+                handle_summarize(agent, arg)
             elif cmd == "/close" and runtime_mode == "hybrid":
                 console.print("\n  [dim]📭 Hybrid runtime has no hosted workspace session to close. Use /exit instead.[/dim]\n")
             elif user_input.startswith("/"):

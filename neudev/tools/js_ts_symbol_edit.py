@@ -1,15 +1,21 @@
-"""Structured JavaScript/TypeScript symbol edit tool for NeuDev."""
+"""Structured JavaScript/TypeScript symbol edit tool for NeuDev - AST-enhanced."""
 
 from __future__ import annotations
 
 import textwrap
+from typing import Optional
 
 from neudev.tools.base import BaseTool, ToolError
 from neudev.tools.js_ts_symbols import JS_TS_EXTENSIONS, find_js_ts_symbol, list_js_ts_symbol_names
+from neudev.ast_parser import JSTSParser, Symbol as ASTSymbol
 
 
 class JsTsSymbolEditTool(BaseTool):
-    """Replace common JS/TS functions, classes, and methods by symbol lookup."""
+    """Replace common JS/TS functions, classes, and methods using AST or fallback parsing."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._ast_parser = JSTSParser()
 
     @property
     def name(self) -> str:
@@ -19,7 +25,8 @@ class JsTsSymbolEditTool(BaseTool):
     def description(self) -> str:
         return (
             "Edit a JavaScript or TypeScript file by replacing a function, class, or class method "
-            "using symbol lookup and structural brace matching."
+            "using AST-based symbol lookup with fallback to structural brace matching. "
+            "Prefer this tool for precise symbol-level edits that preserve formatting."
         )
 
     @property
@@ -39,6 +46,11 @@ class JsTsSymbolEditTool(BaseTool):
                     "type": "string",
                     "description": "Replacement function, class, or method block.",
                 },
+                "use_ast": {
+                    "type": "boolean",
+                    "description": "Force AST-based parsing (default: auto-detect).",
+                    "default": None,
+                },
             },
             "required": ["path", "symbol", "replacement_code"],
         }
@@ -50,7 +62,14 @@ class JsTsSymbolEditTool(BaseTool):
     def permission_message(self, args: dict) -> str:
         return f"Structured JS/TS edit: {args.get('symbol', 'unknown')} in {args.get('path', 'unknown')}"
 
-    def execute(self, path: str, symbol: str, replacement_code: str, **kwargs) -> str:
+    def execute(
+        self,
+        path: str,
+        symbol: str,
+        replacement_code: str,
+        use_ast: Optional[bool] = None,
+        **kwargs,
+    ) -> str:
         filepath = self.resolve_path(path, must_exist=True)
         if filepath.suffix.lower() not in JS_TS_EXTENSIONS:
             raise ToolError(f"js_ts_symbol_edit only supports JS/TS files: {filepath}")
@@ -60,7 +79,17 @@ class JsTsSymbolEditTool(BaseTool):
         except UnicodeDecodeError:
             raise ToolError(f"Cannot edit binary file: {filepath}")
 
-        target = find_js_ts_symbol(source, symbol)
+        # Try AST-based parsing first
+        use_ast_parser = use_ast if use_ast is not None else self._ast_parser.is_available
+        target: Optional[ASTSymbol | dict] = None
+
+        if use_ast_parser:
+            target = self._find_symbol_ast(source, symbol)
+
+        # Fallback to regex-based parsing
+        if target is None:
+            target = find_js_ts_symbol(source, symbol)
+
         if target is None:
             available = ", ".join(list_js_ts_symbol_names(source)[:20])
             raise ToolError(
@@ -68,12 +97,26 @@ class JsTsSymbolEditTool(BaseTool):
                 f"Available symbols: {available or 'none'}"
             )
 
-        replacement_lines = self._prepare_replacement(replacement_code, target["indent"], target["kind"])
+        # Extract symbol properties
+        if isinstance(target, ASTSymbol):
+            symbol_name = target.name
+            indent = self._detect_indent(source, target.start_line - 1)
+            kind = target.kind.value
+            start_index = target.start_line - 1
+            end_index = target.end_line - 1
+        else:
+            symbol_name = target["name"]
+            indent = target.get("indent", "")
+            kind = target["kind"]
+            start_index = target["start_index"]
+            end_index = target["end_index"]
+
+        replacement_lines = self._prepare_replacement(replacement_code, indent, kind)
 
         newline = "\r\n" if "\r\n" in source else "\n"
         lines = source.splitlines()
-        start = target["start_index"]
-        end = target["end_index"] + 1
+        start = start_index
+        end = end_index + 1
         lines[start:end] = replacement_lines
 
         new_source = newline.join(lines)
@@ -81,7 +124,42 @@ class JsTsSymbolEditTool(BaseTool):
             new_source += newline
 
         filepath.write_text(new_source, encoding="utf-8")
-        return f"Structured edited {filepath}: replaced symbol '{symbol}'"
+
+        parse_method = "AST" if isinstance(target, ASTSymbol) else "regex fallback"
+        return f"Structured edited {filepath}: replaced symbol '{symbol_name}' using {parse_method} parsing"
+
+    def _find_symbol_ast(self, source: str, symbol: str) -> Optional[ASTSymbol]:
+        """Find a symbol using AST parsing."""
+        if not self._ast_parser.is_available:
+            return None
+
+        try:
+            symbols = self._ast_parser.parse(source)
+
+            # Try exact match on full_name
+            for sym in symbols:
+                if sym.full_name == symbol or sym.name == symbol:
+                    return sym
+
+            # Try partial match
+            for sym in symbols:
+                if symbol in sym.name or symbol in sym.full_name:
+                    return sym
+
+        except Exception:
+            pass
+
+        return None
+
+    def _detect_indent(self, source: str, line_index: int) -> str:
+        """Detect indentation for a specific line."""
+        lines = source.splitlines()
+        if 0 <= line_index < len(lines):
+            line = lines[line_index]
+            stripped = line.lstrip()
+            if stripped:
+                return line[: len(line) - len(stripped)]
+        return ""
 
     @staticmethod
     def _prepare_replacement(replacement_code: str, indent: str, kind: str) -> list[str]:
