@@ -390,32 +390,42 @@ class NeuDevTracer:
     def trace(
         self,
         name: str,
-        kind: trace.SpanKind = trace.SpanKind.INTERNAL,
+        kind: Any = None,  # type: trace.SpanKind (deferred to avoid import error)
         attributes: Optional[dict[str, Any]] = None,
-    ) -> Generator[Optional[Span], None, None]:
+    ) -> Generator[Optional[Any], None, None]:  # type: Generator[Optional[Span], None, None]
         """Create a trace span."""
         if not self._initialized or self._tracer is None:
             yield None
             return
 
-        with self._tracer.start_as_current_span(name, kind=kind) as span:
-            if attributes:
-                for key, value in attributes.items():
-                    span.set_attribute(key, value)
-            try:
-                yield span
-                span.set_status(Status(StatusCode.OK))
-            except Exception as e:
-                span.set_status(Status(StatusCode.ERROR, str(e)))
-                span.record_exception(e)
-                raise
+        # Import here to avoid evaluation at class definition time
+        if OTEL_AVAILABLE and trace:
+            from opentelemetry.trace import SpanKind, Status, StatusCode
+            
+            # Use default if kind not provided
+            if kind is None:
+                kind = SpanKind.INTERNAL
+                
+            with self._tracer.start_as_current_span(name, kind=kind) as span:
+                if attributes:
+                    for key, value in attributes.items():
+                        span.set_attribute(key, value)
+                try:
+                    yield span
+                    span.set_status(Status(StatusCode.OK))
+                except Exception as e:
+                    span.set_status(Status(StatusCode.ERROR, str(e)))
+                    span.record_exception(e)
+                    raise
+        else:
+            yield None
 
     @contextmanager
     def trace_tool_execution(
         self,
         tool_name: str,
         session_id: Optional[str] = None,
-    ) -> Generator[Optional[Span], None, None]:
+    ) -> Generator[Optional[Any], None, None]:  # type: Generator[Optional[Span], None, None]
         """Trace tool execution."""
         attributes = {
             "tool.name": tool_name,
@@ -432,7 +442,7 @@ class NeuDevTracer:
         self,
         model_name: str,
         session_id: Optional[str] = None,
-    ) -> Generator[Optional[Span], None, None]:
+    ) -> Generator[Optional[Any], None, None]:  # type: Generator[Optional[Span], None, None]
         """Trace model request."""
         attributes = {
             "model.name": model_name,
@@ -448,7 +458,7 @@ class NeuDevTracer:
         self,
         session_id: str,
         message_length: int,
-    ) -> Generator[Optional[Span], None, None]:
+    ) -> Generator[Optional[Any], None, None]:  # type: Generator[Optional[Span], None, None]
         """Trace an agent turn."""
         attributes = {
             "session.id": session_id,
