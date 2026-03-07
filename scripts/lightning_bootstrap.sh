@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 OLLAMA_HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
-NEUDEV_OLLAMA_MODELS="${NEUDEV_OLLAMA_MODELS:-qwen3:latest qwen2.5-coder:7b deepseek-coder-v2:16b}"
+NEUDEV_OLLAMA_MODELS="${NEUDEV_OLLAMA_MODELS:-qwen3:latest qwen2.5-coder:7b deepseek-coder-v2:16b starcoder2:7b}"
+NEUDEV_INSTALL_OLLAMA="${NEUDEV_INSTALL_OLLAMA:-1}"
 OLLAMA_LOG_FILE="${OLLAMA_LOG_FILE:-$HOME/.neudev-ollama.log}"
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
@@ -13,8 +14,20 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
 fi
 
 if ! command -v ollama >/dev/null 2>&1; then
+  if [[ "$NEUDEV_INSTALL_OLLAMA" == "1" ]]; then
+    if ! command -v curl >/dev/null 2>&1; then
+      echo "Ollama is not installed in PATH and curl is required to install it automatically." >&2
+      exit 1
+    fi
+    echo "Ollama was not found in PATH. Installing it with the official Linux installer..."
+    curl -fsSL https://ollama.com/install.sh | sh
+  fi
+fi
+
+if ! command -v ollama >/dev/null 2>&1; then
   echo "Ollama is not installed in PATH." >&2
   echo "Install Ollama first: https://docs.ollama.com/linux" >&2
+  echo "Or rerun with NEUDEV_INSTALL_OLLAMA=1." >&2
   exit 1
 fi
 

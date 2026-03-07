@@ -436,10 +436,14 @@ This repository now includes deployment assets for Lightning:
 
 - `Dockerfile`
 - `.env.lightning.example`
+- `scripts/lightning_bootstrap.sh`
 - `scripts/lightning_entrypoint.sh`
+- `scripts/lightning_quick_tunnel.sh`
 - `docs/lightning-deployment.md`
 
-Recommended update cycle on the Lightning machine:
+Recommended Lightning path: run directly in Studio first, not Docker. It is simpler because Ollama stays on the host GPU machine and you avoid container networking problems around `127.0.0.1:11434`.
+
+First-time Studio setup:
 
 ```bash
 git clone https://github.com/papusethy15-cloud/neudev-cli.git
@@ -453,15 +457,11 @@ Edit `.env.lightning` and set at least:
 - `NEUDEV_WORKSPACE`
 - `NEUDEV_SESSION_STORE`
 - `NEUDEV_OLLAMA_HOST`
+- `NEUDEV_OLLAMA_MODELS`
 
-Then either run the container path:
+The example now defaults `NEUDEV_WORKSPACE` to `/teamspace/studios/this_studio/neudev-cli`, which matches the normal clone path in Lightning Studio.
 
-```bash
-docker build -t neudev-lightning .
-docker run --rm -it --env-file .env.lightning -p 8765:8765 -p 8766:8766 neudev-lightning
-```
-
-Or run directly inside Lightning Studio:
+Then start the hosted server:
 
 ```bash
 set -a
@@ -471,17 +471,94 @@ export NEUDEV_BOOTSTRAP=1
 bash scripts/lightning_entrypoint.sh
 ```
 
-After the first successful bootstrap, set `NEUDEV_BOOTSTRAP=0` for normal restarts.
+The first bootstrap now:
 
-After you push new commits from local development, update Lightning with:
+- installs NeuDev into the active Python environment
+- installs Ollama automatically on Linux when missing if `NEUDEV_INSTALL_OLLAMA=1`
+- starts `ollama serve` if needed
+- pulls every model listed in `NEUDEV_OLLAMA_MODELS`
+- runs the unit test suite
+
+Normal restarts after the first successful bootstrap:
 
 ```bash
-cd /path/to/neudev-cli
-git pull origin main
+set -a
+source .env.lightning
+set +a
+export NEUDEV_BOOTSTRAP=0
 bash scripts/lightning_entrypoint.sh
 ```
 
-Direct Lightning shell startup now runs `python -m neudev.cli` from the cloned repo, so it does not depend on an old globally installed `neu` binary from another environment.
+Health checks from another Lightning terminal:
+
+```bash
+curl http://127.0.0.1:8765/health
+curl http://127.0.0.1:11434/api/tags
+```
+
+If Lightning does not expose public ports in the UI, create a quick public URL:
+
+```bash
+cd ~/neudev-cli
+export NEUDEV_HTTP_PORT=8765
+bash scripts/lightning_quick_tunnel.sh
+```
+
+That tunnel prints a temporary `https://...trycloudflare.com` URL. Keep that terminal open while local users connect.
+
+Windows PowerShell client example:
+
+```powershell
+$LIGHTNING_URL = "https://YOUR-TUNNEL.trycloudflare.com"
+$API_KEY = "YOUR_REAL_SECRET_KEY"
+
+Invoke-RestMethod "$LIGHTNING_URL/health" | ConvertTo-Json -Depth 5
+neu auth login --runtime remote --api-base-url "$LIGHTNING_URL" --api-key "$API_KEY"
+neu run --runtime remote --transport sse
+```
+
+Hybrid local-workspace client example:
+
+```powershell
+$LIGHTNING_URL = "https://YOUR-TUNNEL.trycloudflare.com"
+$API_KEY = "YOUR_REAL_SECRET_KEY"
+
+neu auth login --runtime hybrid --api-base-url "$LIGHTNING_URL" --api-key "$API_KEY"
+neu run --runtime hybrid --transport sse --workspace "C:\path\to\your\repo"
+```
+
+Optional Docker path:
+
+```bash
+docker build -t neudev-lightning .
+docker run --rm -it \
+  --env-file .env.lightning \
+  --add-host=host.docker.internal:host-gateway \
+  -e NEUDEV_WORKSPACE=/workspace/neu-dev \
+  -e NEUDEV_SESSION_STORE=/workspace/.neudev/hosted_sessions \
+  -e NEUDEV_OLLAMA_HOST=http://host.docker.internal:11434 \
+  -p 8765:8765 \
+  -p 8766:8766 \
+  neudev-lightning
+```
+
+Direct Studio startup is still the recommended Lightning path.
+
+Recommended update cycle on the Lightning machine:
+
+```bash
+cd ~/neudev-cli
+git pull origin main
+set -a
+source .env.lightning
+set +a
+export NEUDEV_BOOTSTRAP=0
+bash scripts/lightning_entrypoint.sh
+```
+
+The entrypoint now launches `python -m neudev.cli` from the cloned repo and checks that the configured Ollama API is reachable before it starts the hosted server.
+
+For the full Lightning playbook, including Cloudflare quick tunnels and PowerShell client commands, see [`docs/lightning-deployment.md`](docs/lightning-deployment.md).
 
 ### Release and publish
 
@@ -520,21 +597,20 @@ git clone https://github.com/papusethy15-cloud/neudev-cli.git
 cd neudev-cli
 ```
 
-Install Ollama first using the official Linux instructions if it is not already available on the image:
-
-- https://docs.ollama.com/linux
-
 Then run the included bootstrap script:
 
 ```bash
+export NEUDEV_INSTALL_OLLAMA=1
+export NEUDEV_OLLAMA_MODELS="qwen3:latest qwen2.5-coder:7b deepseek-coder-v2:16b starcoder2:7b"
 bash scripts/lightning_bootstrap.sh
 ```
 
 That script will:
 
 - install NeuDev into the active Python environment
+- install Ollama automatically on Linux when it is missing
 - start `ollama serve` if it is not already running
-- pull the recommended models
+- pull the configured models
 - run the unit test suite
 
 After bootstrap, start the hosted NeuDev API:
@@ -579,6 +655,7 @@ Important deployment note:
 - Expose only the hosted NeuDev API server.
 - Keep Ollama bound to `127.0.0.1` or a private interface on Lightning.
 - If you expose WebSocket streaming, publish the WebSocket port through Lightning as well or keep the client on SSE.
+- If Lightning does not provide public port forwarding in the UI, use `bash scripts/lightning_quick_tunnel.sh` and update the local client with the new tunnel URL.
 
 ### Hosted session behavior
 

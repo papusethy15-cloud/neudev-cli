@@ -26,11 +26,15 @@ class PackagingTests(unittest.TestCase):
         expected = [
             ROOT / "LICENSE",
             ROOT / "MANIFEST.in",
+            ROOT / ".env.lightning.example",
             ROOT / "pyproject.toml",
+            ROOT / "docs" / "lightning-deployment.md",
             ROOT / "docs" / "release.md",
             ROOT / "bin" / "neu.js",
+            ROOT / "scripts" / "lightning_bootstrap.sh",
             ROOT / "scripts" / "npm-postinstall.js",
             ROOT / "scripts" / "npm-uninstall.js",
+            ROOT / "scripts" / "lightning_quick_tunnel.sh",
         ]
         for path in expected:
             self.assertTrue(path.exists(), f"Missing release asset: {path}")
@@ -39,7 +43,14 @@ class PackagingTests(unittest.TestCase):
         script = (ROOT / "scripts" / "lightning_entrypoint.sh").read_text(encoding="utf-8")
         self.assertIn('cd "$ROOT_DIR"', script)
         self.assertIn('-m neudev.cli serve', script)
+        self.assertIn("/api/tags", script)
         self.assertNotIn('set -- neu serve', script)
+
+    def test_lightning_bootstrap_has_auto_install_and_full_model_defaults(self):
+        script = (ROOT / "scripts" / "lightning_bootstrap.sh").read_text(encoding="utf-8")
+        self.assertIn("NEUDEV_INSTALL_OLLAMA", script)
+        self.assertIn("https://ollama.com/install.sh", script)
+        self.assertIn("starcoder2:7b", script)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,29 @@ cd "$ROOT_DIR"
 
 mkdir -p "$NEUDEV_SESSION_STORE"
 
+OLLAMA_MODEL_COUNT="$(
+  "$PYTHON_BIN" - "$NEUDEV_OLLAMA_HOST" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+
+base_url = sys.argv[1].rstrip("/")
+request = urllib.request.Request(f"{base_url}/api/tags", method="GET")
+try:
+    with urllib.request.urlopen(request, timeout=5) as response:
+        payload = json.load(response)
+except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+    raise SystemExit(f"Cannot reach Ollama at {base_url}: {exc}")
+
+print(len(payload.get("models") or []))
+PY
+)" || {
+  echo "NeuDev could not reach the Ollama API at $NEUDEV_OLLAMA_HOST." >&2
+  echo "Start Ollama first, or rerun with NEUDEV_BOOTSTRAP=1 so bootstrap can install/pull the models." >&2
+  exit 1
+}
+
 set -- "$PYTHON_BIN" -m neudev.cli serve \
   --host "$NEUDEV_HOST" \
   --port "$NEUDEV_HTTP_PORT" \
@@ -66,6 +89,12 @@ echo "Starting NeuDev hosted server..."
 echo "  workspace: $NEUDEV_WORKSPACE"
 echo "  session_store: $NEUDEV_SESSION_STORE"
 echo "  ollama_host: $NEUDEV_OLLAMA_HOST"
+echo "  inference_models: $OLLAMA_MODEL_COUNT"
 echo "  run_command_policy: $NEUDEV_HOSTED_RUN_COMMAND_MODE"
+
+if [[ "$OLLAMA_MODEL_COUNT" == "0" ]]; then
+  echo "Warning: Ollama is reachable but no models are installed yet." >&2
+  echo "Run 'bash scripts/lightning_bootstrap.sh' or pull models before exposing the hosted API to users." >&2
+fi
 
 exec env NEUDEV_HOSTED_RUN_COMMAND_MODE="$NEUDEV_HOSTED_RUN_COMMAND_MODE" "$@"
