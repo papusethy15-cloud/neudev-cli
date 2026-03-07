@@ -156,6 +156,7 @@ class ProjectMemoryStore:
 
         if technologies:
             notes.append(f"Preferred stack: {', '.join(technologies[:6])}.")
+            notes.append("Do not introduce a new language or framework unless the user explicitly asks for a stack change.")
         if components:
             notes.append(f"Preserve component layout: {', '.join(components[:4])}.")
         notes.extend(conventions[:4])

@@ -27,7 +27,7 @@ class ModelRoutingTests(unittest.TestCase):
     def test_rank_models_prefers_qwen3_for_tool_heavy_analysis(self):
         ranked, reason = rank_models(
             MODELS,
-            [{"role": "user", "content": "Deeply analyze this repository and fix the agent issue"}],
+            [{"role": "user", "content": "Deeply analyze this repository architecture and explain the agent workflow"}],
             has_tools=True,
         )
 
@@ -100,6 +100,32 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertEqual(ranked[0]["name"], "qwen3:latest")
         self.assertIn("Flutter/Dart", reason)
 
+    def test_rank_models_prefers_qwen25_for_react_analysis_then_implementation(self):
+        ranked, reason = rank_models(
+            MODELS,
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Workspace: app\n"
+                        "Project type: frontend app\n"
+                        "Primary role: frontend\n"
+                        "Technologies: Node.js, React, TypeScript, Vite\n"
+                        "Likely entry files: src/main.tsx, src/App.tsx"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": "Deeply analyze this React app and complete the missing dashboard page and route wiring",
+                },
+            ],
+            has_tools=True,
+        )
+
+        self.assertEqual(ranked[0]["name"], "qwen2.5-coder:7b")
+        self.assertIn("implementation", reason)
+        self.assertIn("React/TypeScript", reason)
+
     def test_rank_models_ignores_embeddings_for_code_search(self):
         ranked, reason = rank_models(
             MODELS,
@@ -127,6 +153,33 @@ class ModelRoutingTests(unittest.TestCase):
         self.assertEqual(team.executor, "qwen2.5-coder:7b")
         self.assertNotEqual(team.reviewer, team.executor)
         self.assertIn("qwen3:latest", team.executor_candidates)
+
+    def test_build_agent_team_uses_coding_executor_for_react_analysis_and_build_requests(self):
+        team = build_agent_team(
+            MODELS,
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Workspace: app\n"
+                        "Project type: frontend app\n"
+                        "Primary role: frontend\n"
+                        "Technologies: Node.js, React, TypeScript, Vite\n"
+                        "Likely entry files: src/main.tsx, src/App.tsx"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": "Deeply analyze this React app and complete the missing dashboard page and route wiring",
+                },
+            ],
+            has_tools=True,
+        )
+
+        self.assertEqual(team.planner, "qwen3:latest")
+        self.assertEqual(team.executor, "qwen2.5-coder:7b")
+        self.assertNotEqual(team.reviewer, team.executor)
+        self.assertIn("React/TypeScript", team.route_reason)
 
     def test_chat_with_tools_falls_back_to_next_candidate(self):
         client = RoutingClient(NeuDevConfig(model="auto"))

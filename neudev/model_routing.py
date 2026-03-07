@@ -171,6 +171,7 @@ CODING_KEYWORDS = {
     "implement",
     "create",
     "build",
+    "complete",
     "generate",
     "function",
     "class",
@@ -178,6 +179,13 @@ CODING_KEYWORDS = {
     "code",
     "feature",
     "endpoint",
+    "component",
+    "page",
+    "route",
+    "layout",
+    "ui",
+    "website",
+    "frontend",
 }
 REFACTOR_KEYWORDS = {
     "refactor",
@@ -383,7 +391,10 @@ def _classify_task(user_text: str, has_tools: bool) -> TaskDecision:
     if search_hits and search_hits >= max(1, strongest_non_search):
         return TaskDecision("code_search", "code search and repository navigation")
 
-    if planning_hits and (planning_hits >= debug_hits or "analyze" in text or "understand" in text):
+    if planning_hits and coding_hits:
+        return TaskDecision("analysis_implementation", "deep analysis followed by implementation")
+
+    if planning_hits and (planning_hits >= debug_hits or ("analyze" in text or "understand" in text) and not debug_hits):
         if has_tools:
             return TaskDecision("planning", "deep analysis and workspace reasoning")
         return TaskDecision("planning", "planning and reasoning")
@@ -427,6 +438,8 @@ def _score_model_for_task(
         score -= 10.0
     if task_type in {"planning", "code_search", "general"} and has_tools and traits.tool_use < 7.0:
         score -= 4.0
+    if task_type == "analysis_implementation" and has_tools and traits.family == "qwen3":
+        score += 2.5
     if task_type == "quick_edit" and not has_tools and traits.family == "starcoder2":
         score += 4.0
     if task_type == "complex_refactor" and traits.family == "deepseek-coder-v2":
@@ -445,6 +458,8 @@ def _score_model_for_task(
 def _task_preference_order(task_type: str, has_tools: bool) -> tuple[str, ...]:
     if task_type == "planning":
         return ("qwen3", "deepseek-coder-v2", "qwen2.5-coder", "deepseek-coder", "codellama", "starcoder2")
+    if task_type == "analysis_implementation":
+        return ("qwen2.5-coder", "qwen3", "deepseek-coder-v2", "deepseek-coder", "starcoder2", "codellama")
     if task_type == "main_coding":
         return ("qwen2.5-coder", "deepseek-coder-v2", "qwen3", "deepseek-coder", "starcoder2", "codellama")
     if task_type == "complex_refactor":
@@ -467,6 +482,8 @@ def _task_preference_order(task_type: str, has_tools: bool) -> tuple[str, ...]:
 def _task_trait_weights(task_type: str, has_tools: bool) -> tuple[float, float, float]:
     if task_type == "planning":
         return 0.5, 1.8, 1.5 if has_tools else 0.4
+    if task_type == "analysis_implementation":
+        return 1.7, 1.3, 1.1 if has_tools else 0.3
     if task_type == "main_coding":
         return 1.9, 0.8, 0.8 if has_tools else 0.2
     if task_type == "complex_refactor":
@@ -561,23 +578,23 @@ def _stack_bonus(family: str, task_type: str, stack_tags: tuple[str, ...], has_t
     bonus = 0.0
 
     if {"React", "TypeScript"} & tags:
-        if family == "qwen2.5-coder" and task_type in {"main_coding", "quick_edit"}:
-            bonus += 3.5
+        if family == "qwen2.5-coder" and task_type in {"analysis_implementation", "main_coding", "quick_edit"}:
+            bonus += 4.0
         if family == "deepseek-coder-v2" and task_type == "complex_refactor":
             bonus += 3.0
-        if family == "qwen3" and task_type in {"planning", "general", "code_search"}:
+        if family == "qwen3" and task_type in {"planning", "analysis_implementation", "general", "code_search"}:
             bonus += 2.0
 
     if {"Flutter", "Dart"} & tags:
         if family == "qwen3" and task_type in {"planning", "debugging", "general"}:
             bonus += 2.8 if has_tools else 2.2
-        if family == "qwen2.5-coder" and task_type in {"main_coding", "quick_edit"}:
+        if family == "qwen2.5-coder" and task_type in {"analysis_implementation", "main_coding", "quick_edit"}:
             bonus += 2.6
         if family == "deepseek-coder-v2" and task_type == "complex_refactor":
             bonus += 2.2
 
     if {"Python", "FastAPI"} & tags:
-        if family == "qwen2.5-coder" and task_type in {"main_coding", "quick_edit"}:
+        if family == "qwen2.5-coder" and task_type in {"analysis_implementation", "main_coding", "quick_edit"}:
             bonus += 2.8
         if family == "deepseek-coder-v2" and task_type == "complex_refactor":
             bonus += 2.5

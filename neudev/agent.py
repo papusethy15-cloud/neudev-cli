@@ -60,6 +60,10 @@ You have access to powerful tools for file system operations:
 - Prefer `python_ast_edit` or `js_ts_symbol_edit` for symbol-level refactors over brittle text replacement
 - Prefer `changed_files_diagnostics` for quick verification after edits and `git_diff_review` before summarizing larger changes
 - When the workspace has frontend/backend, mobile/backend, or multiple components, identify the affected components and inspect the boundary files before editing
+- Determine the active stack and component from workspace context before editing; inspect the nearest package/config/entry files first
+- Do not create files in a different language or framework than the active component unless the user explicitly requests a migration or new service
+- For React/Next/Vite or other frontend work, inspect package.json, tsconfig, app entry/router, and nearby components before scaffolding missing files
+- Use `python_ast_edit` only for existing Python code and `js_ts_symbol_edit` for JavaScript/TypeScript symbol changes
 - If a task requires multiple steps, execute them in order
 - When creating test files, mention they are test files
 - Suggest improvements after creating or modifying code
@@ -1059,9 +1063,11 @@ class Agent:
                     f"Write an INTERNAL execution brief in {self.config.response_language}.\n"
                     "Keep it concise. Include goal, affected components, likely files, tool priority, risks, and verification.\n"
                     "For backend/frontend or multi-component projects, mention both sides and any boundary files or contracts.\n"
+                    "Respect the detected stack and component boundaries. Do not suggest unrelated languages, frameworks, or scaffolding.\n"
                     "Use this exact plain-text structure with section labels followed by bullet items:\n"
                     "TODO:\nFILES:\nCONVENTIONS:\nRISKS:\nVERIFY:\n"
                     "Under TODO, list the concrete task checklist the agent should complete for the user.\n"
+                    "Under FILES, list the first files or entrypoints the executor should inspect.\n"
                     "Under CONVENTIONS, list the existing project patterns or coding structure that must be preserved.\n"
                     "Do not address the user directly. Do not use markdown headings."
                 ),
@@ -1124,7 +1130,7 @@ class Agent:
                 "content": (
                     "You are the preflight reviewer specialist for NeuDev.\n"
                     f"Write an INTERNAL checklist in {self.config.response_language}.\n"
-                    "Focus on likely mistakes, risky file edits, missing validation, tool misuse, and missed cross-component impact.\n"
+                    "Focus on likely mistakes, risky file edits, stack-mismatched changes, missing validation, tool misuse, and missed cross-component impact.\n"
                     "Keep it concise with up to 3 bullets."
                 ),
             },
@@ -1175,7 +1181,7 @@ class Agent:
                 "content": (
                     "You are the reviewer specialist for NeuDev.\n"
                     f"Respond in {self.config.response_language}.\n"
-                    "Review the executor output for correctness, missing validation, risky assumptions, and missed backend/frontend impact.\n"
+                    "Review the executor output for correctness, stack fit, missing validation, risky assumptions, and missed backend/frontend impact.\n"
                     "If everything is acceptable, reply with exactly: Approved.\n"
                     "Otherwise reply with up to 3 short bullet points."
                 ),

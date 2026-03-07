@@ -35,6 +35,8 @@ MOBILE_MARKERS = {"mobile", "android", "ios", "app"}
 FRONTEND_PACKAGES = {"react", "next", "vite", "vue", "nuxt", "svelte", "@angular/core"}
 BACKEND_PACKAGES = {"express", "fastify", "koa", "@nestjs/core", "hono"}
 BACKEND_PYTHON_MARKERS = {"fastapi", "django", "flask", "uvicorn", "starlette"}
+FRONTEND_TECHS = {"React", "Next.js", "Vue", "Nuxt", "Svelte", "Angular"}
+BACKEND_TECHS = {"FastAPI", "Django", "Flask", "Express", "NestJS"}
 NODE_TECH_PACKAGES = {
     "React": {"react"},
     "Next.js": {"next"},
@@ -68,6 +70,42 @@ KEY_FILE_PATTERNS = [
     "Makefile", "Dockerfile", "docker-compose.yml",
     ".gitignore", "requirements.txt", "tsconfig.json",
     "main.py", "app.py", "index.js", "index.ts",
+]
+ENTRY_FILE_PATTERNS = [
+    "src/main.tsx",
+    "src/main.jsx",
+    "src/main.ts",
+    "src/main.js",
+    "src/index.tsx",
+    "src/index.jsx",
+    "src/index.ts",
+    "src/index.js",
+    "src/App.tsx",
+    "src/App.jsx",
+    "src/App.ts",
+    "src/App.js",
+    "app/page.tsx",
+    "app/page.jsx",
+    "app/layout.tsx",
+    "app/layout.jsx",
+    "pages/index.tsx",
+    "pages/index.jsx",
+    "pages/_app.tsx",
+    "pages/_app.jsx",
+    "server.ts",
+    "server.js",
+    "src/server.ts",
+    "src/server.js",
+    "main.py",
+    "app.py",
+    "manage.py",
+    "tsconfig.json",
+    "vite.config.ts",
+    "vite.config.js",
+    "next.config.js",
+    "next.config.mjs",
+    "tailwind.config.js",
+    "tailwind.config.ts",
 ]
 STYLE_FILE_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".dart"}
 DOUBLE_QUOTE_RE = re.compile(r'"[^"\n]*"')
@@ -108,21 +146,27 @@ class WorkspaceContext:
     def _analyze_workspace(self, *, sync_memory: bool) -> dict:
         components = self._detect_components()
         root_type = self._detect_project_type()
-        project_type = self._summarize_project_type(root_type, components)
         technologies = self._detect_technologies(root_type, components)
+        primary_role = self._summarize_primary_role(root_type, components, technologies)
+        project_type = self._summarize_project_type(root_type, components, technologies, primary_role)
         observed_conventions = self._detect_conventions(components, technologies)
+        entry_files = self._find_entry_files(components)
+        stack_guardrails = self._stack_guardrails(primary_role, technologies, components, entry_files)
         self._project_type = project_type
         self._file_count, self._dir_count = self._count_contents()
 
         info = {
             "path": str(self.workspace),
             "project_type": project_type or "unknown",
+            "primary_role": primary_role or "unknown",
             "file_count": self._file_count,
             "dir_count": self._dir_count,
             "key_files": self._find_key_files(self.workspace),
             "components": components,
             "technologies": technologies,
+            "entry_files": entry_files,
             "observed_conventions": observed_conventions,
+            "stack_guardrails": stack_guardrails,
             "external_changes": self.last_external_changes,
         }
 
@@ -304,7 +348,45 @@ class WorkspaceContext:
 
         return self._dedupe_preserve_order(stack)
 
-    def _summarize_project_type(self, root_type: Optional[str], components: list[dict]) -> str:
+    def _summarize_primary_role(
+        self,
+        root_type: Optional[str],
+        components: list[dict],
+        technologies: list[str],
+    ) -> str:
+        """Infer the dominant workload shape for the workspace."""
+        roles = {component["role"] for component in components if component["role"] not in {"workspace", "unknown"}}
+
+        if "frontend" in roles and "backend" in roles:
+            return "fullstack"
+        if "mobile" in roles and "backend" in roles:
+            return "fullstack-mobile"
+        if roles == {"frontend"}:
+            return "frontend"
+        if roles == {"backend"}:
+            return "backend"
+        if roles == {"mobile"}:
+            return "mobile"
+
+        techs = set(technologies)
+        if techs & FRONTEND_TECHS:
+            return "frontend"
+        if techs & BACKEND_TECHS:
+            return "backend"
+        if "Flutter" in techs:
+            return "mobile"
+
+        if root_type == "python":
+            return "backend"
+        return root_type or "unknown"
+
+    def _summarize_project_type(
+        self,
+        root_type: Optional[str],
+        components: list[dict],
+        technologies: list[str],
+        primary_role: str,
+    ) -> str:
         """Collapse component roles into a higher-level project description."""
         roles = {component["role"] for component in components if component["role"] not in {"workspace", "unknown"}}
         project_types = {component["project_type"] for component in components}
@@ -316,6 +398,16 @@ class WorkspaceContext:
             return "fullstack-mobile"
         if roles == {"mobile"}:
             return "mobile app"
+        if primary_role == "frontend":
+            if "Next.js" in technologies:
+                return "frontend web app"
+            if technologies and any(tech in technologies for tech in FRONTEND_TECHS):
+                return "frontend app"
+        if primary_role == "backend":
+            if technologies and any(tech in technologies for tech in BACKEND_TECHS):
+                return "backend service"
+            if root_type == "python":
+                return "python service"
         if len(non_root_components) > 1:
             return "multi-component"
         if len(project_types) > 1:
@@ -370,6 +462,7 @@ class WorkspaceContext:
         parts = [
             f"Workspace: {info['path']}",
             f"Project type: {info['project_type']}",
+            f"Primary role: {info['primary_role']}",
             f"Files: {info['file_count']}, Directories: {info['dir_count']}",
         ]
 
@@ -377,6 +470,8 @@ class WorkspaceContext:
             parts.append(f"Technologies: {', '.join(info['technologies'][:8])}")
         if info.get("key_files"):
             parts.append(f"Key files: {', '.join(info['key_files'])}")
+        if info.get("entry_files"):
+            parts.append(f"Likely entry files: {', '.join(info['entry_files'][:8])}")
 
         components = info.get("components") or []
         if components:
@@ -397,6 +492,10 @@ class WorkspaceContext:
         conventions = info.get("conventions") or []
         if conventions:
             parts.append("Conventions:\n" + "\n".join(f"- {item}" for item in conventions[:6]))
+
+        stack_guardrails = info.get("stack_guardrails") or []
+        if stack_guardrails:
+            parts.append("Stack guardrails:\n" + "\n".join(f"- {item}" for item in stack_guardrails[:4]))
 
         if self.recent_files:
             recent = [Path(f).name for f in self.recent_files[:5]]
@@ -537,9 +636,74 @@ class WorkspaceContext:
         elif len([component for component in components if component["path"] != "."]) > 1:
             conventions.append("Preserve the existing multi-component directory structure when editing.")
 
+        if set(technologies) & FRONTEND_TECHS:
+            conventions.append("Reuse the existing frontend entry, routing, styling, and component patterns before adding files.")
+        if set(technologies) & BACKEND_TECHS:
+            conventions.append("Preserve the existing API and service structure before adding new backend modules.")
         if "Flutter" in technologies:
             conventions.append("Preserve the existing Flutter widget and state-management structure.")
         return conventions
+
+    def _find_entry_files(self, components: list[dict], limit: int = 8) -> list[str]:
+        """Find likely entry or boundary files that define project structure."""
+        found: list[str] = []
+        search_roots = [self.workspace]
+
+        for component in components:
+            if component["path"] == ".":
+                continue
+            search_roots.append(self.workspace / component["path"])
+
+        for directory in search_roots:
+            for pattern in ENTRY_FILE_PATTERNS:
+                path = directory / pattern
+                if not path.exists():
+                    continue
+                rel_path = self._relative_path(path)
+                if rel_path not in found:
+                    found.append(rel_path)
+                if len(found) >= limit:
+                    return found
+        return found
+
+    def _stack_guardrails(
+        self,
+        primary_role: str,
+        technologies: list[str],
+        components: list[dict],
+        entry_files: list[str],
+    ) -> list[str]:
+        """Generate short stack-boundary reminders for the system prompt."""
+        techs = set(technologies)
+        roles = {component["role"] for component in components if component["role"] not in {"workspace", "unknown"}}
+        guardrails: list[str] = []
+
+        if "frontend" in roles and "backend" in roles:
+            guardrails.append(
+                "This workspace has separate frontend and backend components. Inspect the affected side first and only cross the boundary when contracts or APIs actually change."
+            )
+        elif primary_role == "frontend" or techs & FRONTEND_TECHS:
+            guardrails.append(
+                "Treat this as a frontend workspace. Inspect package.json, app entry files, routing, and nearby UI components before creating new files."
+            )
+        elif primary_role == "backend" or techs & BACKEND_TECHS:
+            guardrails.append(
+                "Treat this as a backend/service workspace. Inspect the main API entrypoints, config, and nearby service modules before adding files."
+            )
+
+        if techs & FRONTEND_TECHS:
+            guardrails.append(
+                "Keep web-app changes in existing JS/TS frontend files and folders. Do not introduce unrelated Python, Dart, or backend scaffolding unless the user explicitly asks for a stack change."
+            )
+        elif "Python" in techs or techs & BACKEND_TECHS:
+            guardrails.append(
+                "Keep service changes in the existing backend language and project structure. Do not scaffold unrelated frontend apps unless the user explicitly asks for them."
+            )
+
+        if entry_files:
+            guardrails.append(f"Start repository inspection from likely boundary files such as: {', '.join(entry_files[:4])}.")
+
+        return self._dedupe_preserve_order(guardrails)
 
     @staticmethod
     def _indentation_convention(indent_sizes: list[int], tab_indentation: int) -> str:

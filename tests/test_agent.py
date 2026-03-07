@@ -11,6 +11,7 @@ from neudev.model_routing import AgentTeam
 
 FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "workspace_basic"
 FULLSTACK_FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "workspace_fullstack"
+REACT_FIXTURE_ROOT = Path(__file__).resolve().parent / "fixtures" / "workspace_react_app"
 
 
 class FakeOllamaClient:
@@ -589,6 +590,18 @@ class AgentTests(unittest.TestCase):
         self.assertIn("- frontend [frontend/node]", system_prompt)
         self.assertIn("Project Memory:", system_prompt)
         self.assertIn("Preferred stack:", system_prompt)
+
+    @patch("neudev.agent.OllamaClient", FakeOllamaClient)
+    def test_system_prompt_adds_frontend_stack_guardrails_for_react_workspaces(self):
+        agent = Agent(self.config, str(REACT_FIXTURE_ROOT))
+        system_prompt = agent.conversation[0]["content"]
+
+        self.assertIn("Project type: frontend app", system_prompt)
+        self.assertIn("Primary role: frontend", system_prompt)
+        self.assertIn("Likely entry files: src/main.tsx", system_prompt)
+        self.assertIn("Stack guardrails:", system_prompt)
+        self.assertIn("Do not introduce unrelated Python", system_prompt)
+        self.assertIn("Do not create files in a different language or framework than the active component", system_prompt)
 
     @patch("neudev.agent.OllamaClient", FakeOllamaClient)
     def test_project_memory_persists_user_directed_style_changes(self):
