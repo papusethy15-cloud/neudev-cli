@@ -656,10 +656,15 @@ def build_trace_summary_lines(trace: ExecutionTraceState) -> list[str]:
             preview_files = trace.changed_targets[:3]  # Show first 3 changed files
             for file_path in preview_files:
                 rel_path = _make_workspace_relative(file_path, "")
-                # Determine change type
-                if file_path in trace.workspace_delta_counts.get("created", []):
+                # Determine change type based on workspace delta counts
+                # We can't know exact type per file, so use heuristics
+                created_count = trace.workspace_delta_counts.get("created", 0)
+                deleted_count = trace.workspace_delta_counts.get("deleted", 0)
+                
+                # Simple heuristic: if mostly creations, assume new; if mostly deletions, assume deleted
+                if created_count > 0 and deleted_count == 0:
                     change_type = "[success]+new[/success]"
-                elif file_path in trace.workspace_delta_counts.get("deleted", []):
+                elif deleted_count > 0 and created_count == 0:
                     change_type = "[error]-deleted[/error]"
                 else:
                     change_type = "[warning]~modified[/warning]"
