@@ -109,7 +109,7 @@ class DependencyInstallTool(BaseTool):
             raise ToolError(
                 "Could not detect package manager. No config file found "
                 "(package.json, requirements.txt, Cargo.toml, go.mod, etc.). "
-                "Specify the manager explicitly."
+                "Specify the manager explicitly or create a config file first."
             )
 
         if detected_manager not in PACKAGE_MANAGERS:
@@ -142,8 +142,38 @@ class DependencyInstallTool(BaseTool):
                 timeout=120,
             )
         except FileNotFoundError:
+            # Provide helpful fallback based on manager type
+            fallback_suggestions = {
+                "npm": (
+                    "npm is not installed. Install Node.js from https://nodejs.org/ or use:\n"
+                    "  - Windows: winget install OpenJS.NodeJS.LTS\n"
+                    "  - macOS: brew install node\n"
+                    "  - Linux: sudo apt install npm  or  sudo dnf install npm"
+                ),
+                "pip": (
+                    "pip is not installed. Ensure Python is installed from https://python.org/\n"
+                    "Or use: python -m ensurepip --upgrade"
+                ),
+                "yarn": (
+                    "yarn is not installed. Install with: npm install -g yarn"
+                ),
+                "pnpm": (
+                    "pnpm is not installed. Install with: npm install -g pnpm"
+                ),
+                "cargo": (
+                    "cargo is not installed. Install Rust from https://rustup.rs/"
+                ),
+                "go": (
+                    "go is not installed. Install from https://go.dev/dl/"
+                ),
+            }
+            suggestion = fallback_suggestions.get(
+                detected_manager,
+                f"Please install {detected_manager} and ensure it's in your PATH."
+            )
             raise ToolError(
-                f"Package manager '{detected_manager}' is not installed or not in PATH."
+                f"Package manager '{detected_manager}' is not installed or not in PATH.\n\n"
+                f"💡 {suggestion}"
             )
         except subprocess.TimeoutExpired:
             raise ToolError(f"Installation timed out after 120 seconds.")

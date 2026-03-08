@@ -1362,6 +1362,10 @@ class Agent:
     def _run_planner(self, messages: list[dict], tool_defs: list[dict], team: AgentTeam, on_progress=None) -> str:
         """Ask the planner model for a concise execution brief."""
         tool_names = ", ".join(tool["function"]["name"] for tool in tool_defs if tool.get("function"))
+        
+        # Extract the actual user request from the conversation
+        user_request = self._extract_user_request(messages)
+        
         planner_messages = [
             {
                 "role": "system",
@@ -1376,7 +1380,16 @@ class Agent:
                     "Under TODO, list the concrete task checklist the agent should complete for the user.\n"
                     "Under FILES, list the first files or entrypoints the executor should inspect.\n"
                     "Under CONVENTIONS, list the existing project patterns or coding structure that must be preserved.\n"
-                    "Do not address the user directly. Do not use markdown headings."
+                    "Do not address the user directly. Do not use markdown headings.\n\n"
+                    "## CRITICAL RULES TO PREVENT HALLUCINATION:\n"
+                    "1. ONLY create TODO items based on the EXPLICIT user request shown in the conversation snapshot.\n"
+                    "2. DO NOT invent tasks, files, or directories that the user did not mention.\n"
+                    "3. If the user request is simple (greeting, question), keep TODO empty or minimal.\n"
+                    "4. DO NOT assume files/directories exist - verify with tools first.\n"
+                    "5. For new project creation, use project_init tool, don't manually create files.\n"
+                    "6. If workspace is empty and user wants new content, scaffold first, then implement.\n"
+                    "7. NEVER reference files/directories from previous unrelated conversations.\n"
+                    "8. Base your plan SOLELY on the current user request, not historical context.\n"
                 ),
             },
             {
@@ -1384,7 +1397,10 @@ class Agent:
                 "content": (
                     f"Workspace context:\n{self.context.get_system_context()}\n\n"
                     f"Available tools: {tool_names}\n\n"
-                    f"Conversation snapshot:\n{self._conversation_snapshot(messages)}"
+                    f"Conversation snapshot:\n{self._conversation_snapshot(messages)}\n\n"
+                    f"EXPLICIT USER REQUEST: {user_request}\n\n"
+                    "IMPORTANT: Create TODO items ONLY for the explicit user request above. "
+                    "Do not add tasks from previous conversations or assume file existence."
                 ),
             },
         ]
@@ -1441,6 +1457,8 @@ class Agent:
     def _run_preflight_reviewer(self, messages: list[dict], tool_defs: list[dict], team: AgentTeam, on_progress=None) -> str:
         """Ask the reviewer model for an internal checklist before execution."""
         tool_names = ", ".join(tool["function"]["name"] for tool in tool_defs if tool.get("function"))
+        user_request = self._extract_user_request(messages)
+        
         reviewer_messages = [
             {
                 "role": "system",
@@ -1448,7 +1466,13 @@ class Agent:
                     "You are the preflight reviewer specialist for NeuDev.\n"
                     f"Write an INTERNAL checklist in {self.config.response_language}.\n"
                     "Focus on likely mistakes, risky file edits, stack-mismatched changes, missing validation, tool misuse, and missed cross-component impact.\n"
-                    "Keep it concise with up to 3 bullets."
+                    "Keep it concise with up to 3 bullets.\n\n"
+                    "## CRITICAL ANTI-HALLUCINATION CHECK:\n"
+                    "1. Verify the planner's TODO items match the EXPLICIT user request.\n"
+                    "2. Flag any TODO items that reference files/directories not mentioned by the user.\n"
+                    "3. Ensure the plan doesn't assume file existence without verification.\n"
+                    "4. For simple requests (greetings, questions), flag if planner created unnecessary tasks.\n"
+                    "5. If workspace is empty, flag if planner assumes files exist.\n"
                 ),
             },
             {
@@ -1456,7 +1480,9 @@ class Agent:
                 "content": (
                     f"Workspace context:\n{self.context.get_system_context()}\n\n"
                     f"Available tools: {tool_names}\n\n"
-                    f"Conversation snapshot:\n{self._conversation_snapshot(messages)}"
+                    f"Conversation snapshot:\n{self._conversation_snapshot(messages)}\n\n"
+                    f"EXPLICIT USER REQUEST: {user_request}\n\n"
+                    "IMPORTANT: Your checklist should catch any planner hallucination or tasks not grounded in the user request."
                 ),
             },
         ]
@@ -1700,6 +1726,20 @@ class Agent:
         if any(keyword in lowered for keyword in verify_keywords):
             return "verify"
         return "other"
+
+    @staticmethod
+    def _extract_user_request(messages: list[dict]) -> str:
+        """Extract the most recent user request from the conversation for grounded planning."""
+        # Find the last user message (non-system, non-assistant)
+        for msg in reversed(messages):
+            role = msg.get("role", "")
+            content = str(msg.get("content", "")).strip()
+            if role == "user" and content:
+                # Truncate very long requests but keep them grounded
+                if len(content) > 500:
+                    return content[:500].rstrip() + "..."
+                return content
+        return "No explicit request - user may be greeting or asking a question."
 
     @staticmethod
     def _conversation_snapshot(messages: list[dict], limit: int = 4) -> str:

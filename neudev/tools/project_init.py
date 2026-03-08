@@ -12,13 +12,17 @@ TEMPLATES: dict[str, dict[str, str | list[str]]] = {
         "description": "Python project with pyproject.toml, src layout, and tests",
         "directories": ["src", "tests", "docs"],
         "files": {
-            "pyproject.toml": (
-                '[build-system]\nrequires = ["setuptools>=68.0", "wheel"]\n'
-                'build-backend = "setuptools.backends._legacy_resolver"\n\n'
-                "[project]\nname = \"{name}\"\nversion = \"0.1.0\"\n"
-                'description = ""\nreadme = "README.md"\n'
-                'requires-python = ">=3.10"\n'
-            ),
+            "pyproject.toml": """[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{name}"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.10"
+""",
             "README.md": "# {name}\n\nA new Python project.\n",
             "src/__init__.py": "",
             "tests/__init__.py": "",
@@ -35,14 +39,19 @@ TEMPLATES: dict[str, dict[str, str | list[str]]] = {
         "description": "Node.js project with package.json and src directory",
         "directories": ["src", "tests"],
         "files": {
-            "package.json": (
-                '{{\n  "name": "{name}",\n  "version": "1.0.0",\n'
-                '  "description": "",\n  "main": "src/index.js",\n'
-                '  "scripts": {{\n    "start": "node src/index.js",\n'
-                '    "test": "echo \\"Error: no test specified\\" && exit 1"\n'
-                "  }},\n"
-                '  "keywords": [],\n  "license": "MIT"\n}}\n'
-            ),
+            "package.json": """{{
+  "name": "{name}",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.js",
+  "scripts": {{
+    "start": "node src/index.js",
+    "test": "echo \\"Error: no test specified\\" && exit 1"
+  }},
+  "keywords": [],
+  "license": "MIT"
+}}
+""",
             "README.md": "# {name}\n\nA new Node.js project.\n",
             "src/index.js": 'console.log("Hello from {name}!");\n',
             ".gitignore": "node_modules/\ndist/\n.env\n*.log\n",
@@ -52,13 +61,24 @@ TEMPLATES: dict[str, dict[str, str | list[str]]] = {
         "description": "React + Vite project structure",
         "directories": ["src", "src/components", "public"],
         "files": {
-            "package.json": (
-                '{{\n  "name": "{name}",\n  "version": "0.1.0",\n'
-                '  "private": true,\n'
-                '  "scripts": {{\n    "dev": "vite",\n    "build": "vite build"\n  }},\n'
-                '  "dependencies": {{\n    "react": "^18.3.0",\n    "react-dom": "^18.3.0"\n  }},\n'
-                '  "devDependencies": {{\n    "vite": "^5.0.0",\n    "@vitejs/plugin-react": "^4.0.0"\n  }}\n}}\n'
-            ),
+            "package.json": """{{
+  "name": "{name}",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {{
+    "dev": "vite",
+    "build": "vite build"
+  }},
+  "dependencies": {{
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  }},
+  "devDependencies": {{
+    "vite": "^5.0.0",
+    "@vitejs/plugin-react": "^4.0.0"
+  }}
+}}
+""",
             "README.md": "# {name}\n\nA new React + Vite project.\n",
             "index.html": (
                 '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n'
@@ -84,18 +104,21 @@ TEMPLATES: dict[str, dict[str, str | list[str]]] = {
         "description": "FastAPI project with app structure",
         "directories": ["app", "app/routers", "tests"],
         "files": {
-            "pyproject.toml": (
-                '[build-system]\nrequires = ["setuptools>=68.0"]\n'
-                'build-backend = "setuptools.backends._legacy_resolver"\n\n'
-                "[project]\nname = \"{name}\"\nversion = \"0.1.0\"\n"
-                'dependencies = ["fastapi>=0.110.0", "uvicorn>=0.29.0"]\n'
-            ),
+            "pyproject.toml": """[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{name}"
+version = "0.1.0"
+dependencies = ["fastapi>=0.110.0", "uvicorn>=0.29.0"]
+""",
             "requirements.txt": "fastapi>=0.110.0\nuvicorn>=0.29.0\n",
             "README.md": "# {name}\n\nA new FastAPI project.\n",
             "app/__init__.py": "",
             "app/main.py": (
                 "from fastapi import FastAPI\n\napp = FastAPI(title=\"{name}\")\n\n\n"
-                "@app.get(\"/\")\ndef root():\n    return {{\"message\": \"Hello from {name}!\"}}\n"
+                "@app.get(\"/\")\ndef root():\n    return {\"message\": \"Hello from {name}!\"}\n"
             ),
             "app/routers/__init__.py": "",
             "tests/__init__.py": "",

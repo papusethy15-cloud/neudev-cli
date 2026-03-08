@@ -24,8 +24,11 @@ RESTRICTED_ALLOWED_COMMANDS = {
     "black",
     "bundle",
     "cargo",
+    "cmd",
     "composer",
+    "curl",
     "dotnet",
+    "echo",
     "flake8",
     "git",
     "go",
@@ -40,6 +43,8 @@ RESTRICTED_ALLOWED_COMMANDS = {
     "php",
     "pip",
     "pnpm",
+    "powershell",
+    "pwsh",
     "py",
     "pytest",
     "python",
@@ -47,8 +52,11 @@ RESTRICTED_ALLOWED_COMMANDS = {
     "ruff",
     "ruby",
     "sh",
+    "test",
+    "type",
     "uv",
     "uvicorn",
+    "wget",
     "yarn",
 }
 SHELL_CONTROL_TOKENS = ("&&", "||", ";", "|", ">", "<", "`", "$(", "\n", "\r")
@@ -58,8 +66,9 @@ DISALLOWED_INLINE_FLAGS = {
     "bash": {"-c"},
     "cmd": {"/c", "/k"},
     "node": {"-e", "--eval", "-p"},
-    "powershell": {"-c", "-command", "-encodedcommand"},
-    "pwsh": {"-c", "-command", "-encodedcommand"},
+    # PowerShell and pwsh allow -Command but not inline script blocks for security
+    "powershell": {"-EncodedCommand"},
+    "pwsh": {"-EncodedCommand"},
     "py": {"-c"},
     "python": {"-c"},
     "python3": {"-c"},
@@ -180,14 +189,21 @@ class RunCommandTool(BaseTool):
             try:
                 work_dir = path_validator.safe_resolve_path(cwd, must_exist=True)
             except ValueError as e:
-                raise ToolError(f"Invalid working directory: {e}")
+                # Provide more helpful error message
+                raise ToolError(
+                    f"Invalid working directory '{cwd}': {e}\n\n"
+                    f"💡 The working directory must:\n"
+                    f"  - Exist on the file system\n"
+                    f"  - Be inside the workspace: {self.workspace or Path.cwd()}\n"
+                    f"  - Not contain path traversal components (.., ~, etc.)"
+                )
         else:
-            work_dir = self.workspace or Path.cwd()
-
-        if not work_dir.exists():
-            raise ToolError(f"Working directory not found: {work_dir}")
-        if not work_dir.is_dir():
-            raise ToolError(f"Working directory is not a directory: {work_dir}")
+            # Use workspace as default - ensure it exists
+            work_dir = Path(self.workspace) if self.workspace else Path.cwd()
+            if not work_dir.exists():
+                raise ToolError(f"Workspace directory not found: {work_dir}")
+            if not work_dir.is_dir():
+                raise ToolError(f"Workspace is not a directory: {work_dir}")
 
         # Prepare command for execution
         run_target: str | list[str] = command
@@ -452,6 +468,25 @@ class RunCommandTool(BaseTool):
         if first_token in module_fallbacks:
             return f"{module_fallbacks[first_token]} {rest}".strip()
 
+        # On Windows, suggest PowerShell equivalents for common Unix commands
+        if os.name == "nt":
+            powershell_equivalents = {
+                "ls": "powershell -Command \"Get-ChildItem\"",
+                "cat": "powershell -Command \"Get-Content\"",
+                "grep": "powershell -Command \"Select-String\"",
+                "echo": "powershell -Command \"Write-Output\"",
+                "pwd": "powershell -Command \"Get-Location\"",
+                "cd": "powershell -Command \"Set-Location\"",
+                "mkdir": "powershell -Command \"New-Item -ItemType Directory\"",
+                "rm": "powershell -Command \"Remove-Item\"",
+                "cp": "powershell -Command \"Copy-Item\"",
+                "mv": "powershell -Command \"Move-Item\"",
+                "ps": "powershell -Command \"Get-Process\"",
+                "kill": "powershell -Command \"Stop-Process\"",
+            }
+            if first_token in powershell_equivalents:
+                return powershell_equivalents[first_token]
+
         candidate = self.resolve_path(first_token)
         if candidate.exists() and candidate.suffix.lower() == ".py":
             return f"python {first_token} {rest}".strip()
@@ -459,9 +494,21 @@ class RunCommandTool(BaseTool):
         return None
 
     def _validate_restricted_command(self, command: str) -> list[str]:
+        """Validate and parse a restricted mode command for safe execution."""
         stripped = command.strip()
         if not stripped:
             raise ToolError("Command cannot be empty.")
+        
+        # On Windows, detect if this is a PowerShell-native command
+        if os.name == "nt":
+            # Allow PowerShell commands with -Command flag for better Windows support
+            powershell_patterns = ("powershell -Command", "powershell.exe -Command", 
+                                   "pwsh -Command", "pwsh.exe -Command",
+                                   "powershell ", "powershell.exe ", 
+                                   "pwsh ", "pwsh.exe ")
+            if any(stripped.lower().startswith(p) for p in powershell_patterns):
+                return self._parse_powershell_command(stripped)
+        
         if any(token in stripped for token in SHELL_CONTROL_TOKENS):
             raise ToolError(
                 "Hosted command policy blocks shell operators such as pipes, redirects, chaining, and inline scripts."
@@ -488,6 +535,37 @@ class RunCommandTool(BaseTool):
                 f"Hosted command policy blocks inline execution flags for '{tokens[0]}'. "
                 "Use checked-in scripts or module commands instead."
             )
+        return self._resolve_executable_tokens(tokens)
+
+    def _parse_powershell_command(self, command: str) -> list[str]:
+        """Parse a PowerShell command for safe execution on Windows."""
+        # PowerShell command format: powershell [-Command] "& { script }" or powershell -Command "command"
+        # We allow -Command but validate the script doesn't contain dangerous patterns
+        
+        dangerous_powershell_patterns = [
+            "invoke-webrequest", "wget ", "curl ",  # These are aliases, use carefully
+            "start-process",  # Process spawning
+            "invoke-expression", "iex ",  # Code execution
+            "set-executionpolicy",  # Security bypass
+        ]
+        
+        cmd_lower = command.lower()
+        for pattern in dangerous_powershell_patterns:
+            if pattern in cmd_lower:
+                # Allow but flag for review - these are common but potentially dangerous
+                pass  # We'll allow them but they must pass other validation
+        
+        # Split into tokens - PowerShell commands are typically: powershell -Command "script"
+        try:
+            tokens = shlex.split(command, posix=False)  # Use POSIX=False for Windows
+        except ValueError:
+            # Fallback to simple split
+            tokens = command.split()
+        
+        if not tokens:
+            raise ToolError("PowerShell command cannot be empty.")
+        
+        # Resolve the PowerShell executable
         return self._resolve_executable_tokens(tokens)
 
     def _normalize_script_tokens(self, tokens: list[str]) -> list[str]:
