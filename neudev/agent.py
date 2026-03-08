@@ -61,7 +61,7 @@ Choose tools based on your task type for optimal results:
 
 **For debugging tasks** (errors, bugs, issues):
 1. grep_search → Find error messages in code
-2. read_file → Examine relevant files  
+2. read_file → Examine relevant files
 3. diagnostics → Run tests/lint to confirm issue
 4. edit_file or smart_edit_file → Fix the problem
 5. run_command → Verify the fix works
@@ -72,6 +72,17 @@ Choose tools based on your task type for optimal results:
 3. write_file → Create new files (use overwrite=true to replace existing)
 4. run_command → Test your changes
 5. diagnostics → Ensure code quality
+
+**For website creation tasks** (HTML/CSS/JS websites, landing pages, web apps):
+1. project_init → Use template='html' with name parameter to scaffold standard website structure (FASTEST)
+   - Example: project_init(template='html', name='Travel GO', directory='.')
+2. write_file → Create individual HTML, CSS, or JS files with complete content
+   - For single-page websites: write index.html, css/style.css, js/script.js
+   - Always write COMPLETE file content, not placeholders
+3. dependency_install → Install any npm packages if needed
+4. run_command → Test with `python -m http.server` or open in browser
+⚠️ IMPORTANT: Do NOT use web_search or url_fetch to create website files - these are for research only!
+⚠️ IMPORTANT: Do NOT call project_init multiple times - call once with correct template and name
 
 **For refactoring tasks** (restructuring, renaming):
 1. symbol_search → Find all usages across the repo
@@ -86,13 +97,18 @@ Choose tools based on your task type for optimal results:
 2. url_fetch → Read documentation from URLs
 3. read_file → Check existing implementations
 4. grep_search → Search for related patterns in codebase
+⚠️ IMPORTANT: web_search and url_fetch are for RESEARCH ONLY - they do NOT create files!
 
 **For dependency management**:
 1. dependency_install → Install all dependencies or add new packages (auto-detects manager)
 2. run_command → Verify installation with package-specific commands
 
 **For new projects**:
-1. project_init → Scaffold standard project structure (Python, Node.js, React)
+1. project_init → Scaffold standard project structure (Python, Node.js, React, HTML)
+   - HTML websites: project_init(template='html', name='Project Name')
+   - Python projects: project_init(template='python', name='project-name')
+   - Node.js projects: project_init(template='node', name='project-name')
+   - React projects: project_init(template='react', name='Project Name')
 2. dependency_install → Install the created project's dependencies
 
 **For bulk text replacement**:

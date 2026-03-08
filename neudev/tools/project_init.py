@@ -13,8 +13,8 @@ TEMPLATES: dict[str, dict[str, str | list[str]]] = {
         "directories": ["css", "js", "assets"],
         "files": {
             "index.html": '<!DOCTYPE html>\n<html lang="en">\n<head>\n    <meta charset="UTF-8">\n    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n    <title>{name}</title>\n    <link rel="stylesheet" href="css/style.css">\n</head>\n<body>\n    <header>\n        <nav>\n            <h1>{name}</h1>\n            <ul>\n                <li><a href="#home">Home</a></li>\n                <li><a href="#about">About</a></li>\n                <li><a href="#contact">Contact</a></li>\n            </ul>\n        </nav>\n    </header>\n    <main>\n        <section id="home">\n            <h2>Welcome to {name}</h2>\n            <p>Your amazing content here</p>\n        </section>\n    </main>\n    <footer>\n        <p>&copy; 2024 {name}. All rights reserved.</p>\n    </footer>\n    <script src="js/script.js"></script>\n</body>\n</html>\n',
-            "css/style.css": "/* Modern CSS Reset */\n* {\n    margin: 0;\n    padding: 0;\n    box-sizing: border-box;\n}\n\nbody {\n    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;\n    line-height: 1.6;\n    color: #333;\n}\n\nheader {\n    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);\n    color: white;\n    padding: 1rem;\n}\n\nnav {\n    display: flex;\n    justify-content: space-between;\n    align-items: center;\n    max-width: 1200px;\n    margin: 0 auto;\n}\n\nnav ul {\n    display: flex;\n    list-style: none;\n    gap: 2rem;\n}\n\nnav a {\n    color: white;\n    text-decoration: none;\n}\n\nmain {\n    max-width: 1200px;\n    margin: 2rem auto;\n    padding: 0 1rem;\n}\n\nsection {\n    margin-bottom: 3rem;\n}\n\nfooter {\n    background: #333;\n    color: white;\n    text-align: center;\n    padding: 2rem;\n    margin-top: 3rem;\n}\n",
-            "js/script.js": "// Modern JavaScript\nconsole.log('{name} - Website Loaded');\n\n// Smooth scrolling for navigation\ndocument.querySelectorAll('a[href^=\"#\"]').forEach(anchor => {\n    anchor.addEventListener('click', function (e) {\n        e.preventDefault();\n        const target = document.querySelector(this.getAttribute('href'));\n        if (target) {\n            target.scrollIntoView({ behavior: 'smooth' });\n        }\n    });\n});\n\n// Add your custom JavaScript here\n",
+            "css/style.css": "/* Modern CSS Reset */\n* {{\n    margin: 0;\n    padding: 0;\n    box-sizing: border-box;\n}}\n\nbody {{\n    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;\n    line-height: 1.6;\n    color: #333;\n}}\n\nheader {{\n    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);\n    color: white;\n    padding: 1rem;\n}}\n\nnav {{\n    display: flex;\n    justify-content: space-between;\n    align-items: center;\n    max-width: 1200px;\n    margin: 0 auto;\n}}\n\nnav ul {{\n    display: flex;\n    list-style: none;\n    gap: 2rem;\n}}\n\nnav a {{\n    color: white;\n    text-decoration: none;\n}}\n\nmain {{\n    max-width: 1200px;\n    margin: 2rem auto;\n    padding: 0 1rem;\n}}\n\nsection {{\n    margin-bottom: 3rem;\n}}\n\nfooter {{\n    background: #333;\n    color: white;\n    text-align: center;\n    padding: 2rem;\n    margin-top: 3rem;\n}}\n",
+            "js/script.js": "// Modern JavaScript\nconsole.log('{name} - Website Loaded');\n\n// Smooth scrolling for navigation\ndocument.querySelectorAll('a[href^=\"#\"]').forEach(anchor => {{\n    anchor.addEventListener('click', function (e) {{\n        e.preventDefault();\n        const target = document.querySelector(this.getAttribute('href'));\n        if (target) {{\n            target.scrollIntoView({{ behavior: 'smooth' }});\n        }}\n    }});\n}});\n\n// Add your custom JavaScript here\n",
             "README.md": "# {name}\n\nA modern single-page website.\n\n## Structure\n\n- `index.html` - Main HTML file\n- `css/style.css` - Modern CSS styling\n- `js/script.js` - JavaScript interactivity\n\n## Usage\n\nOpen `index.html` in a web browser.\n",
         },
     },
@@ -60,8 +60,8 @@ TEMPLATES: dict[str, dict[str, str | list[str]]] = {
                 "  <React.StrictMode>\n    <App />\n  </React.StrictMode>\n);\n"
             ),
             "src/App.jsx": (
-                "export default function App() {\n"
-                "  return <h1>Hello from {name}!</h1>;\n}\n"
+                "export default function App() {{\n"
+                "  return <h1>Hello from {name}!</h1>;\n}}\n"
             ),
             ".gitignore": "node_modules/\ndist/\n.env\n*.log\n",
         },
@@ -74,7 +74,7 @@ TEMPLATES: dict[str, dict[str, str | list[str]]] = {
             "requirements.txt": "fastapi>=0.110.0\nuvicorn>=0.29.0\n",
             "README.md": "# {name}\n\nA new FastAPI project.\n",
             "app/__init__.py": "",
-            "app/main.py": "from fastapi import FastAPI\n\napp = FastAPI(title=\"{name}\")\n\n\n@app.get(\"/\")\ndef root():\n    return {\"message\": \"Hello from {name}!\"}\n",
+            "app/main.py": "from fastapi import FastAPI\n\napp = FastAPI(title=\"{name}\")\n\n\n@app.get(\"/\")\ndef root():\n    return {{\"message\": \"Hello from {name}!\"}}\n",
             "app/routers/__init__.py": "",
             "tests/__init__.py": "",
             ".gitignore": "__pycache__/\n*.pyc\n.venv/\nvenv/\n.env\n*.egg-info/\n.pytest_cache/\n",
