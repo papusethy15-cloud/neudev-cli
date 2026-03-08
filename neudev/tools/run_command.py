@@ -350,7 +350,7 @@ class RunCommandTool(BaseTool):
                     timeout=timeout,
                     env=env,
                     # Don't create new process group on Windows to avoid issues
-                    creationflags=subprocess.CREATE_NO_PROCESS_GROUP if os.name == "nt" else 0,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
                 )
                 return result
             except subprocess.TimeoutExpired:

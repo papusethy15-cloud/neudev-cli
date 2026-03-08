@@ -29,6 +29,23 @@ class FakeHostedOllamaClient:
             raise AssertionError("No fake responses configured")
         return self.responses.pop(0)
 
+    def chat(self, messages, tools=None, stream=False, think=False, model_name=None):
+        """Fallback chat method for when chat_with_tools is not used."""
+        self.last_used_model = model_name or self.model
+        if not self.responses:
+            raise AssertionError("No fake responses configured")
+        response = self.responses.pop(0)
+        # Wrap response in message format if needed
+        if "message" not in response:
+            return {"message": response}
+        return response
+
+    def chat_with_fallback(self, messages, think=False, preferred_models=None, route_reason=None):
+        """Chat with fallback - uses chat method."""
+        self.last_used_model = self.model
+        self.last_route_reason = route_reason or ""
+        return self.chat(messages, think=think, model_name=preferred_models[0] if preferred_models else None)
+
     def get_display_model(self):
         return self.last_used_model or self.model
 
@@ -114,6 +131,7 @@ class RemoteAPITests(unittest.TestCase):
         client = self._client()
         session = RemoteSessionClient.create(client, workspace=".")
         hosted = self.service.sessions[session.session_id]
+        # Set up responses for all possible LLM method calls
         hosted.agent.llm.responses = [
             {
                 "content": "Hosted answer",
@@ -121,7 +139,31 @@ class RemoteAPITests(unittest.TestCase):
                 "tool_calls": [],
                 "done": True,
                 "native_tools_supported": True,
-            }
+            },
+            {
+                "content": "Hosted answer",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
+        ]
+        # Also set chat_responses for chat_with_fallback calls
+        hosted.agent.llm.chat_responses = [
+            {
+                "message": {
+                    "content": "Hosted answer",
+                    "thinking": "",
+                    "tool_calls": [],
+                }
+            },
+            {
+                "message": {
+                    "content": "Hosted answer",
+                    "thinking": "",
+                    "tool_calls": [],
+                }
+            },
         ]
 
         payload = session.send_message("Analyze this project")

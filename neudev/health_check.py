@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
@@ -110,7 +110,7 @@ class HealthChecker:
 
         return HealthReport(
             status=overall_status,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
             checks=checks,
             service_info=self._get_service_info(),
         )

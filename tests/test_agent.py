@@ -273,7 +273,15 @@ class AgentTests(unittest.TestCase):
             },
             {"message": {"content": "Approved.", "thinking": "", "tool_calls": []}},
         ]
+        # Add extra responses for potential retry/completion guard calls
         agent.llm.responses = [
+            {
+                "content": "Done.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
             {
                 "content": "Done.",
                 "thinking": "",
@@ -397,6 +405,7 @@ class AgentTests(unittest.TestCase):
             show_thinking=False,
         )
         agent = Agent(config, str(self.workspace))
+        agent.permissions.auto_approve = True
         agent.llm.team = AgentTeam(
             planner="qwen3:latest",
             executor="qwen2.5-coder:7b",
@@ -433,7 +442,15 @@ class AgentTests(unittest.TestCase):
             return {"message": {"content": content, "thinking": "", "tool_calls": []}}
 
         agent.llm.chat_handler = chat_handler
+        # Add extra responses for potential retry/completion guard calls
         agent.llm.responses = [
+            {
+                "content": "Implemented the feature.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
             {
                 "content": "Implemented the feature.",
                 "thinking": "",
@@ -470,7 +487,9 @@ class AgentTests(unittest.TestCase):
     @patch("neudev.agent.OllamaClient", FakeOllamaClient)
     def test_external_editor_changes_are_detected_and_injected_into_runtime_messages(self):
         agent = Agent(self.config, str(self.workspace))
+        agent.permissions.auto_approve = True
         self.readme_path.write_text(self.original_readme + "\neditor change\n", encoding="utf-8")
+        # Add extra responses for potential retry/completion guard calls
         agent.llm.responses = [
             {
                 "content": "I checked the latest changes.",
@@ -478,7 +497,14 @@ class AgentTests(unittest.TestCase):
                 "tool_calls": [],
                 "done": True,
                 "native_tools_supported": True,
-            }
+            },
+            {
+                "content": "I checked the latest changes.",
+                "thinking": "",
+                "tool_calls": [],
+                "done": True,
+                "native_tools_supported": True,
+            },
         ]
 
         detected = []

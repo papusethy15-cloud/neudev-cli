@@ -241,6 +241,7 @@ class ToolSmartnessTests(unittest.TestCase):
                 self.returncode = 0
                 self.calls = 0
                 self.killed = False
+                self.pid = 12345  # Fake PID for process group operations
 
             def communicate(self, timeout=None):
                 self.calls += 1
@@ -254,11 +255,22 @@ class ToolSmartnessTests(unittest.TestCase):
                 self.returncode = 1
 
         process = FakeProcess()
-        with patch("subprocess.Popen", return_value=process), patch("time.monotonic", side_effect=[0.0, 0.0, 0.5]):
+        
+        # On Windows, os.killpg doesn't exist, so we only patch on Unix
+        import os
+        if os.name != 'nt':
+            killpg_patch = patch("os.killpg")
+            getpgid_patch = patch("os.getpgid", return_value=12345)
+        else:
+            killpg_patch = patch("os.killpg", create=True)  # create=True allows patching non-existent attributes
+            getpgid_patch = patch("os.getpgid", return_value=12345, create=True)
+        
+        with patch("subprocess.Popen", return_value=process), patch("time.monotonic", side_effect=[0.0, 0.0, 0.5]), killpg_patch as mock_killpg, getpgid_patch:
             with self.assertRaises(Exception) as cm:
                 tool.execute("python --version", progress_callback=events.append, stop_event=stop_event)
 
-        self.assertTrue(process.killed)
+        # Check that either process.kill() or os.killpg() was called
+        self.assertTrue(process.killed or mock_killpg.called)
         self.assertIn("Command stopped by user", str(cm.exception))
         self.assertEqual(events[-1]["mode"], "stop_requested")
 

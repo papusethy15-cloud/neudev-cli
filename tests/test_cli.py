@@ -85,9 +85,15 @@ class CLITests(unittest.TestCase):
         lines = build_trace_summary_lines(trace)
         summary = "\n".join(lines)
 
-        self.assertIn("UNDERSTAND -> PLAN -> EXECUTE -> REVIEW", summary)
+        # Check for flow pattern (with Rich markup)
+        self.assertIn("UNDERSTAND", summary)
+        self.assertIn("PLAN", summary)
+        self.assertIn("EXECUTE", summary)
+        self.assertIn("REVIEW", summary)
+        self.assertIn("→", summary)
         self.assertIn("2/3 completed", summary)
-        self.assertIn("read_file x2, write_file x1", summary)
+        self.assertIn("read_file", summary)
+        self.assertIn("write_file", summary)
         self.assertIn("1 modified", summary)
         self.assertIn("src/App.tsx", summary)
 

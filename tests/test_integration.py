@@ -1,11 +1,16 @@
 """Integration tests with mock Ollama server."""
 
-import json
-import pytest
+import unittest
 from unittest.mock import Mock, patch, MagicMock
-from typing import Any, Generator
 
-import responses
+try:
+    import pytest
+    import responses
+    HAS_TEST_DEPS = True
+except ImportError:
+    HAS_TEST_DEPS = False
+    pytest = None
+    responses = None
 
 
 # Mock Ollama responses
@@ -39,32 +44,35 @@ MOCK_OLLAMA_CHAT_RESPONSE = {
 }
 
 
-class TestMockOllamaIntegration:
+@unittest.skipIf(not HAS_TEST_DEPS, "pytest and responses are required for these tests")
+class TestMockOllamaIntegration(unittest.TestCase):
     """Integration tests using mock Ollama server."""
 
-    @pytest.fixture
-    def mock_ollama(self) -> Generator[None, None, None]:
+    def setUp(self):
         """Set up mock Ollama responses."""
-        with responses.RequestsMock() as rsps:
-            # Mock model list endpoint
-            rsps.add(
-                responses.GET,
-                "http://127.0.0.1:11434/api/tags",
-                json=MOCK_OLLAMA_MODELS,
-                status=200,
-            )
+        if not HAS_TEST_DEPS:
+            self.skipTest("pytest and responses are required")
+        self.rsps = responses.RequestsMock()
+        # Mock model list endpoint
+        self.rsps.add(
+            responses.GET,
+            "http://127.0.0.1:11434/api/tags",
+            json=MOCK_OLLAMA_MODELS,
+            status=200,
+        )
+        # Mock chat completion endpoint
+        self.rsps.add(
+            responses.POST,
+            "http://127.0.0.1:11434/api/chat",
+            json=MOCK_OLLAMA_CHAT_RESPONSE,
+            status=200,
+        )
+        self.rsps.start()
 
-            # Mock chat completion endpoint
-            rsps.add(
-                responses.POST,
-                "http://127.0.0.1:11434/api/chat",
-                json=MOCK_OLLAMA_CHAT_RESPONSE,
-                status=200,
-            )
+    def tearDown(self):
+        self.rsps.stop()
 
-            yield rsps
-
-    def test_llm_client_lists_models(self, mock_ollama):
+    def test_llm_client_lists_models(self):
         """Test that LLM client can list models."""
         from neudev.llm import OllamaClient
         from neudev.config import NeuDevConfig
@@ -74,10 +82,10 @@ class TestMockOllamaIntegration:
 
         models = client.list_models()
 
-        assert len(models) == 2
-        assert models[0]["name"] == "qwen3:latest"
+        self.assertEqual(len(models), 2)
+        self.assertEqual(models[0]["name"], "qwen3:latest")
 
-    def test_llm_client_chat_completion(self, mock_ollama):
+    def test_llm_client_chat_completion(self):
         """Test LLM client chat completion."""
         from neudev.llm import OllamaClient
         from neudev.config import NeuDevConfig
@@ -88,11 +96,12 @@ class TestMockOllamaIntegration:
         messages = [{"role": "user", "content": "Hello"}]
         response = client.chat(messages)
 
-        assert "content" in response
-        assert "NeuDev" in response["content"]
+        self.assertIn("content", response)
+        self.assertIn("NeuDev", response["content"])
 
 
-class TestSecurityModule:
+@unittest.skipIf(not HAS_TEST_DEPS, "pytest and responses are required for these tests")
+class TestSecurityModule(unittest.TestCase):
     """Tests for security modules."""
 
     def test_secret_detector_finds_api_key(self):
@@ -104,8 +113,8 @@ class TestSecurityModule:
 
         findings = detector.detect_secrets(text)
 
-        assert len(findings) > 0
-        assert any("API" in f.secret_type or "Key" in f.secret_type for f in findings)
+        self.assertGreater(len(findings), 0)
+        self.assertTrue(any("API" in f.secret_type or "Key" in f.secret_type for f in findings))
 
     def test_secret_detector_redacts_text(self):
         """Test secret redaction."""
@@ -117,7 +126,7 @@ class TestSecurityModule:
         findings = detector.detect_secrets(text)
         redacted = detector.redact_text(text)
 
-        assert "wJalr" not in redacted or "[REDACTED]" in redacted
+        self.assertTrue("wJalr" not in redacted or "[REDACTED]" in redacted)
 
     def test_path_security_blocks_traversal(self):
         """Test path traversal protection."""
@@ -126,8 +135,8 @@ class TestSecurityModule:
         validator = PathSecurityValidator("/workspace")
         result = validator.validate_path("../etc/passwd")
 
-        assert not result.is_safe
-        assert result.risk_level == PathRiskLevel.BLOCKED
+        self.assertFalse(result.is_safe)
+        self.assertEqual(result.risk_level, PathRiskLevel.BLOCKED)
 
     def test_path_security_allows_safe_paths(self):
         """Test safe path validation."""
@@ -137,25 +146,30 @@ class TestSecurityModule:
         result = validator.validate_path("src/main.py")
 
         # Should be blocked as outside workspace
-        assert not result.is_safe or result.outside_workspace
+        self.assertTrue(not result.is_safe or result.outside_workspace)
 
 
-class TestAuditLogging:
+@unittest.skipIf(not HAS_TEST_DEPS, "pytest and responses are required for these tests")
+class TestAuditLogging(unittest.TestCase):
     """Tests for audit logging."""
 
-    def test_audit_logger_logs_events(self, tmp_path):
+    def test_audit_logger_logs_events(self):
         """Test audit event logging."""
-        from neudev.audit import AuditLogger, AuditEventType
+        import tempfile
+        from pathlib import Path
+        from neudev.audit import AuditLogger
 
-        log_dir = tmp_path / "audit_logs"
-        logger = AuditLogger(log_dir=str(log_dir), enabled=True)
-        logger.set_session("test-session-123")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            log_dir = tmp_path / "audit_logs"
+            logger = AuditLogger(log_dir=str(log_dir), enabled=True)
+            logger.set_session("test-session-123")
 
-        logger.log_tool_execute("read_file", "test.py", {"path": "test.py"})
+            logger.log_tool_execute("read_file", "test.py", {"path": "test.py"})
 
-        # Check log file was created
-        log_files = list(log_dir.glob("*.jsonl"))
-        assert len(log_files) > 0
+            # Check log file was created
+            log_files = list(log_dir.glob("*.jsonl"))
+            self.assertGreater(len(log_files), 0)
 
     def test_rate_limiter_limits_calls(self):
         """Test rate limiting."""
@@ -173,13 +187,13 @@ class TestAuditLogging:
         # Third call should be rate limited
         allowed3, reason = limiter.check_rate_limit("test_tool")
 
-        assert allowed1
-        assert allowed2
-        assert not allowed3
-        assert "Rate limit" in reason
+        self.assertTrue(allowed1)
+        self.assertTrue(allowed2)
+        self.assertFalse(allowed3)
+        self.assertIn("Rate limit", reason)
 
 
-class TestASTParser:
+class TestASTParser(unittest.TestCase):
     """Tests for AST parser."""
 
     def test_ast_parser_extracts_functions(self):
@@ -202,13 +216,13 @@ class TestASTParser:
         if parser.is_available:
             symbols = parser.parse(source)
 
-            assert len(symbols) >= 1
-            assert any(s.kind == SymbolKind.FUNCTION for s in symbols)
-            assert any(s.kind == SymbolKind.CLASS for s in symbols)
+            self.assertGreaterEqual(len(symbols), 1)
+            self.assertTrue(any(s.kind == SymbolKind.FUNCTION for s in symbols))
+            self.assertTrue(any(s.kind == SymbolKind.CLASS for s in symbols))
         else:
             # Fallback to regex parsing
             symbols = parser.parse(source)
-            assert len(symbols) >= 1
+            self.assertGreaterEqual(len(symbols), 1)
 
     def test_ast_parser_fallback_to_regex(self):
         """Test fallback to regex parsing when tree-sitter unavailable."""
@@ -219,10 +233,10 @@ class TestASTParser:
 
         # Should work even without tree-sitter
         symbols = parser.parse(source)
-        assert len(symbols) >= 1
+        self.assertGreaterEqual(len(symbols), 1)
 
 
-class TestHealthCheck:
+class TestHealthCheck(unittest.TestCase):
     """Tests for health check module."""
 
     def test_health_checker_creates_report(self):
@@ -237,9 +251,9 @@ class TestHealthCheck:
 
         report = checker.check_all()
 
-        assert report.status in [HealthStatus.HEALTHY, HealthStatus.DEGRADED, HealthStatus.UNHEALTHY]
-        assert len(report.checks) > 0
-        assert "service_info" in report.to_dict()
+        self.assertIn(report.status, [HealthStatus.HEALTHY, HealthStatus.DEGRADED, HealthStatus.UNHEALTHY])
+        self.assertGreater(len(report.checks), 0)
+        self.assertIn("service_info", report.to_dict())
 
     def test_health_check_disk_space(self):
         """Test disk space health check."""
@@ -248,12 +262,12 @@ class TestHealthCheck:
         checker = create_health_checker()
         result = checker.check_disk_space()
 
-        assert result.check_name == "disk_space"
-        assert result.details is not None
-        assert "free_gb" in result.details
+        self.assertEqual(result.check_name, "disk_space")
+        self.assertIsNotNone(result.details)
+        self.assertIn("free_gb", result.details)
 
 
-class TestObservability:
+class TestObservability(unittest.TestCase):
     """Tests for observability module."""
 
     def test_logger_creates_instance(self):
@@ -261,25 +275,28 @@ class TestObservability:
         from neudev.observability import get_logger, NeuDevLogger
 
         logger = get_logger()
-        assert isinstance(logger, NeuDevLogger)
+        self.assertIsInstance(logger, NeuDevLogger)
 
     def test_metrics_collector_initializes(self):
         """Test metrics collector initialization."""
-        from neudev.observability import get_metrics, NeuDevMetrics
-
+        from neudev.observability import get_metrics, NeuDevMetrics, PROMETHEUS_AVAILABLE
+        
+        if not PROMETHEUS_AVAILABLE:
+            self.skipTest("prometheus-client is not available")
+        
         metrics = get_metrics()
-        assert isinstance(metrics, NeuDevMetrics)
+        self.assertIsInstance(metrics, NeuDevMetrics)
 
     def test_tracer_creates_spans(self):
         """Test tracer span creation."""
         from neudev.observability import get_tracer, NeuDevTracer
 
         tracer = get_tracer()
-        assert isinstance(tracer, NeuDevTracer)
+        self.assertIsInstance(tracer, NeuDevTracer)
 
 
-@pytest.mark.integration
-class TestAgentIntegration:
+@unittest.skipIf(not HAS_TEST_DEPS, "pytest is required for these tests")
+class TestAgentIntegration(unittest.TestCase):
     """Integration tests for agent with mocked components."""
 
     @patch("neudev.llm.OllamaClient")
@@ -298,8 +315,8 @@ class TestAgentIntegration:
 
         # This would normally call the LLM
         # We're just testing the integration works
-        assert agent is not None
-        assert agent.workspace == "/tmp"
+        self.assertIsNotNone(agent)
+        self.assertEqual(agent.workspace, "/tmp")
 
 
 # Run tests with: pytest tests/test_integration.py -v
