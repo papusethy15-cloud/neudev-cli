@@ -1380,10 +1380,16 @@ class Agent:
     def _run_planner(self, messages: list[dict], tool_defs: list[dict], team: AgentTeam, on_progress=None) -> str:
         """Ask the planner model for a concise execution brief."""
         tool_names = ", ".join(tool["function"]["name"] for tool in tool_defs if tool.get("function"))
-        
+
         # Extract the actual user request from the conversation
         user_request = self._extract_user_request(messages)
         
+        # Check if project_init was already called in this session
+        project_init_called = any(
+            action.action == "tool" and "project_init" in str(action.target)
+            for action in self.session.actions
+        )
+
         planner_messages = [
             {
                 "role": "system",
@@ -1404,10 +1410,14 @@ class Agent:
                     "2. DO NOT invent tasks, files, or directories that the user did not mention.\n"
                     "3. If the user request is simple (greeting, question), keep TODO empty or minimal.\n"
                     "4. DO NOT assume files/directories exist - verify with tools first.\n"
-                    "5. For new project creation, use project_init tool, don't manually create files.\n"
-                    "6. If workspace is empty and user wants new content, scaffold first, then implement.\n"
-                    "7. NEVER reference files/directories from previous unrelated conversations.\n"
-                    "8. Base your plan SOLELY on the current user request, not historical context.\n"
+                    "5. For new project creation, use project_init tool ONCE, then customize the created files.\n"
+                    "6. NEVER call project_init more than once - after scaffolding, use write_file/edit_file to customize.\n"
+                    "7. If workspace is empty and user wants new content, scaffold first with project_init, then implement.\n"
+                    "8. NEVER reference files/directories from previous unrelated conversations.\n"
+                    "9. Base your plan SOLELY on the current user request, not historical context.\n"
+                    "10. After project_init creates files, DO NOT call it again - use write_file/edit_file for customization.\n"
+                    "11. For website creation: project_init creates structure, then write_file adds custom content/design.\n"
+                    "12. AVOID excessive list_directory calls - use only when you need to discover unknown directory structure.\n"
                 ),
             },
             {
@@ -1417,6 +1427,7 @@ class Agent:
                     f"Available tools: {tool_names}\n\n"
                     f"Conversation snapshot:\n{self._conversation_snapshot(messages)}\n\n"
                     f"EXPLICIT USER REQUEST: {user_request}\n\n"
+                    f"PROJECT_INIT STATUS: {'Already called in this session - DO NOT call again, use write_file/edit_file to customize' if project_init_called else 'Not yet called - can use for initial scaffolding'}\n\n"
                     "IMPORTANT: Create TODO items ONLY for the explicit user request above. "
                     "Do not add tasks from previous conversations or assume file existence."
                 ),

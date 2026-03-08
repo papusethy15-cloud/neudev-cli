@@ -275,6 +275,7 @@ class ExecutionTraceState:
     last_plan_signature: tuple = field(default_factory=tuple)
     last_plan_active_item: str = ""
     last_plan_completed: int = 0
+    custom_fields: dict[str, Any] = field(default_factory=dict)
 
     def elapsed_seconds(self) -> float:
         """Return the turn duration."""
