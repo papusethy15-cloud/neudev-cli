@@ -20,6 +20,25 @@ if ! command -v ollama >/dev/null 2>&1; then
       exit 1
     fi
     echo "Ollama was not found in PATH. Installing it with the official Linux installer..."
+    # Install zstd dependency required by Ollama installer
+    if command -v apt-get >/dev/null 2>&1; then
+      echo ">>> Installing zstd (required for Ollama extraction)..."
+      apt-get update -qq && apt-get install -y -qq zstd || echo "Warning: Failed to install zstd via apt-get"
+    elif command -v dnf >/dev/null 2>&1; then
+      echo ">>> Installing zstd (required for Ollama extraction)..."
+      dnf install -y zstd || echo "Warning: Failed to install zstd via dnf"
+    elif command -v yum >/dev/null 2>&1; then
+      echo ">>> Installing zstd (required for Ollama extraction)..."
+      yum install -y zstd || echo "Warning: Failed to install zstd via yum"
+    elif command -v pacman >/dev/null 2>&1; then
+      echo ">>> Installing zstd (required for Ollama extraction)..."
+      pacman -S --noconfirm zstd || echo "Warning: Failed to install zstd via pacman"
+    elif command -v apk >/dev/null 2>&1; then
+      echo ">>> Installing zstd (required for Ollama extraction)..."
+      apk add --no-cache zstd || echo "Warning: Failed to install zstd via apk"
+    else
+      echo "Warning: Could not detect package manager. Ollama installation may fail if zstd is missing." >&2
+    fi
     curl -fsSL https://ollama.com/install.sh | sh
   fi
 fi

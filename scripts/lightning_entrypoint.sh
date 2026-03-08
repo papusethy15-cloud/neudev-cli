@@ -17,6 +17,20 @@ NEUDEV_BOOTSTRAP="${NEUDEV_BOOTSTRAP:-0}"
 NEUDEV_OLLAMA_HOST="${NEUDEV_OLLAMA_HOST:-${OLLAMA_HOST:-http://127.0.0.1:11434}}"
 NEUDEV_HOSTED_RUN_COMMAND_MODE="${NEUDEV_HOSTED_RUN_COMMAND_MODE:-restricted}"
 
+# Ensure zstd is available for Ollama operations
+if ! command -v zstd >/dev/null 2>&1; then
+  echo "zstd not found. Installing for Ollama support..."
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y -qq zstd || echo "Warning: Failed to install zstd"
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y zstd || echo "Warning: Failed to install zstd"
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y zstd || echo "Warning: Failed to install zstd"
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache zstd || echo "Warning: Failed to install zstd"
+  fi
+fi
+
 if [[ -z "${NEUDEV_API_KEY:-}" ]]; then
   echo "NEUDEV_API_KEY must be set before starting the hosted server." >&2
   exit 1
