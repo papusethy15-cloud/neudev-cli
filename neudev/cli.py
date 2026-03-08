@@ -729,15 +729,15 @@ def _format_permission_panel_body(message: str, *, hosted: bool = False, countdo
     lines = [
         f"[bold white]{message}[/bold white]",
         "",
-        "[bold bright_yellow]Choose an option:[/bold bright_yellow]",
+        "[bold bright_yellow]📋 CHOOSE AN OPTION (type number or shortcut):[/bold bright_yellow]",
         "",
-        "  [success][1][/success] ✅ Allow once            [dim](y, /approve)[/dim]",
-        "  [success][2][/success] 🔄 Allow this tool       [dim](a, /approve tool)[/dim]",
-        "  [success][3][/success] 🟢 Allow all for session  [dim](all, /approve all)[/dim]",
-        "  [error][4][/error] ❌ Deny                  [dim](n, /deny)[/dim]",
-        f"  [warning][5][/warning] 🛑 {stop_hint:24s}  [dim](/stop)[/dim]",
+        "  [bold green][1] y[/bold green]       → [dim]Allow once (this time only)[/dim]",
+        "  [bold green][2] a[/bold green]       → [dim]Allow this tool (for session)[/dim]",
+        "  [bold green][3] all[/bold green]     → [dim]Allow all (no more prompts)[/dim]",
+        "  [bold red][4] n[/bold red]       → [dim]Deny this request[/dim]",
+        f"  [bold red][5] /stop[/bold red]   → [dim]{stop_hint}[/dim]",
         "",
-        f"[dim italic]Enter choice (1-5) or use the shortcut commands above.{countdown_display}[/dim italic]",
+        f"[dim italic]💡 Quick: Press 1-5 or type y/a/all/n then press Enter{countdown_display}[/dim italic]",
     ]
     return "\n".join(lines)
 

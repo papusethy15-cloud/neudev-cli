@@ -1,14 +1,19 @@
-# NeuDev CLI Analysis & Fixes - COMPLETE
+# NeuDev CLI Analysis & Fixes - COMPLETE v2
 
 ## Executive Summary
 
-After deep analysis of the execution trace from the NeuDev CLI AI agent, I identified **10 critical issues** preventing proper understanding and implementation of user commands. **All issues have been fixed.**
+After deep analysis of the execution trace from the NeuDev CLI AI agent, I identified **12 critical issues** preventing proper understanding and implementation of user commands. **All issues have been fixed.**
+
+**Latest Fixes (v2):**
+- ✅ Fixed `project_init` JSON template escaping (proper `{{` for literal braces)
+- ✅ Enhanced permission UI with clear numbered options
+- ✅ Improved permission prompt visibility
 
 ---
 
 ## Issues Identified from Execution Trace
 
-### Issue 1: `project_init` Tool - Template Parsing Failure 🔴 CRITICAL ✅ FIXED
+### Issue 1: `project_init` Tool - Template Parsing Failure 🔴 CRITICAL ✅ FIXED (v2)
 
 **Symptom:**
 ```
@@ -333,14 +338,86 @@ On Windows, basic commands like `echo`, `ls`, `cat` would fail because:
 
 ---
 
+### Issue 11: `project_init` Template Escaping Still Failing 🔴 CRITICAL ✅ FIXED (v2)
+
+**Symptom:**
+Even after the first fix, the tool still failed with:
+```
+TOOL    FAIL project_init Unexpected Error (project_init): ValueError: unexpected '{' in field...
+```
+
+**Root Cause:**
+The first fix attempt changed `{{` to `{` in the JSON templates, which was incorrect. Python's `.format()` method requires `{{` to represent a literal `{` in the output, and `{name}` for placeholders.
+
+**Files Modified:**
+- `neudev/tools/project_init.py`
+
+**Fix Applied:**
+Corrected the template escaping to use proper Python format string syntax:
+- `{{` for literal JSON opening braces
+- `}}` for literal JSON closing braces  
+- `{name}` for the project name placeholder
+
+Example fix for `package.json`:
+```python
+# CORRECT:
+"package.json": "{{\n  \"name\": \"{name}\",\n  \"scripts\": {{\n    \"start\": \"node\"\n  }}\n}}\n"
+
+# WRONG (causes ValueError):
+"package.json": "{{\n  \"name\": \"{name}\",\n  \"scripts\": {\n    \"start\": \"node\"\n  }\n}}\n"
+```
+
+---
+
+### Issue 12: Permission UI Options Not Prominent Enough 🟡 MEDIUM ✅ FIXED (v2)
+
+**Symptom:**
+When permission is required, the panel appears but:
+- Options are not clearly numbered
+- User doesn't know they can just type 1-5
+- Shortcuts are not obvious
+
+**Files Modified:**
+- `neudev/cli.py`
+
+**Fix Applied:**
+Enhanced `_format_permission_panel_body()` with:
+- Clear numbered options [1] through [5]
+- Bold colors for quick recognition (green for allow, red for deny)
+- Explicit instruction: "💡 Quick: Press 1-5 or type y/a/all/n then press Enter"
+- Better descriptions for each option
+
+Before:
+```
+Choose an option:
+  [1] ✅ Allow once            (y, /approve)
+  [2] 🔄 Allow this tool       (a, /approve tool)
+```
+
+After:
+```
+📋 CHOOSE AN OPTION (type number or shortcut):
+
+  [1] y       → Allow once (this time only)
+  [2] a       → Allow this tool (for session)
+  [3] all     → Allow all (no more prompts)
+  [4] n       → Deny this request
+  [5] /stop   → stop task & deny
+
+💡 Quick: Press 1-5 or type y/a/all/n then press Enter
+```
+
+---
+
 ## Files Modified
 
 | File | Changes | Impact |
 |------|---------|--------|
-| `neudev/tools/project_init.py` | Fixed JSON template escaping | ✅ Enables project scaffolding |
+| `neudev/tools/project_init.py` | Fixed JSON template escaping (proper `{{` for braces) | ✅ Enables project scaffolding |
 | `neudev/tools/dependency_install.py` | Added helpful error messages | ✅ Better UX for missing tools |
-| `neudev/tools/run_command.py` | Enhanced path validation, expanded command whitelist, PowerShell support | ✅ Fixes command execution on Windows & Linux |
+| `neudev/tools/run_command.py` | Enhanced path validation, expanded whitelist, PowerShell support | ✅ Fixes command execution on Windows & Linux |
 | `neudev/agent.py` | Added anti-hallucination prompts, user request extraction | ✅ Prevents planner hallucination |
+| `neudev/cli.py` | Enhanced permission UI with clear numbered options | ✅ Better permission prompts |
 
 ---
 
@@ -430,26 +507,28 @@ The reviewer model should summarize actual tool results, not generic notes. This
 
 ## Conclusion
 
-All **10 issues** identified in the execution trace have been fixed:
+All **12 issues** identified in the execution traces have been fixed:
 
 ### Code-Level Issues (All Fixed):
-- ✅ Tool template parsing errors (`project_init`)
+- ✅ Tool template parsing errors (`project_init`) - FIXED v2 with proper `{{` escaping
 - ✅ Missing dependency installation guidance (`dependency_install`)
 - ✅ Path validation errors (`run_command`)
 - ✅ Blocked basic commands (`run_command` whitelist)
 - ✅ PowerShell support for Windows (`run_command`)
+- ✅ Permission UI clarity (`cli.py`) - FIXED v2 with numbered options
 
 ### Model-Level Issues (Fixed via Prompt Engineering):
 - ✅ Planner hallucination (anti-hallucination prompts added)
 - ✅ Preflight reviewer validation (enhanced checks)
 
 The fixes significantly improve the CLI's ability to:
-1. Scaffold new projects without parsing errors
+1. Scaffold new projects without parsing errors (v2 fix)
 2. Install dependencies with helpful error messages
 3. Execute shell commands on both Windows (PowerShell) and Linux/Mac
 4. Prevent planner from hallucinating non-existent tasks
 5. Ground plans in the explicit user request only
 6. Provide better user feedback and error guidance
+7. Show clear permission options with numbered choices (v2 fix)
 
 ---
 
@@ -515,5 +594,5 @@ To verify all fixes are working:
 ---
 
 **Generated:** 2026-03-08  
-**Last Updated:** 2026-03-08 (All 10 issues fixed)  
+**Last Updated:** 2026-03-08 v2 (12 issues fixed - template escaping + permission UI)  
 **Analyst:** NeuDev Code Analysis

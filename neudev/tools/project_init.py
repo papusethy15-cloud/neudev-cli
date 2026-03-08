@@ -39,19 +39,7 @@ requires-python = ">=3.10"
         "description": "Node.js project with package.json and src directory",
         "directories": ["src", "tests"],
         "files": {
-            "package.json": """{{
-  "name": "{name}",
-  "version": "1.0.0",
-  "description": "",
-  "main": "src/index.js",
-  "scripts": {{
-    "start": "node src/index.js",
-    "test": "echo \\"Error: no test specified\\" && exit 1"
-  }},
-  "keywords": [],
-  "license": "MIT"
-}}
-""",
+            "package.json": "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"description\": \"\",\n  \"main\": \"src/index.js\",\n  \"scripts\": {{\n    \"start\": \"node src/index.js\",\n    \"test\": \"echo \\\\\"Error: no test specified\\\\\" && exit 1\"\n  }},\n  \"keywords\": [],\n  \"license\": \"MIT\"\n}}\n",
             "README.md": "# {name}\n\nA new Node.js project.\n",
             "src/index.js": 'console.log("Hello from {name}!");\n',
             ".gitignore": "node_modules/\ndist/\n.env\n*.log\n",
@@ -61,24 +49,7 @@ requires-python = ">=3.10"
         "description": "React + Vite project structure",
         "directories": ["src", "src/components", "public"],
         "files": {
-            "package.json": """{{
-  "name": "{name}",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {{
-    "dev": "vite",
-    "build": "vite build"
-  }},
-  "dependencies": {{
-    "react": "^18.3.0",
-    "react-dom": "^18.3.0"
-  }},
-  "devDependencies": {{
-    "vite": "^5.0.0",
-    "@vitejs/plugin-react": "^4.0.0"
-  }}
-}}
-""",
+            "package.json": "{{\n  \"name\": \"{name}\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"scripts\": {{\n    \"dev\": \"vite\",\n    \"build\": \"vite build\"\n  }},\n  \"dependencies\": {{\n    \"react\": \"^18.3.0\",\n    \"react-dom\": \"^18.3.0\"\n  }},\n  \"devDependencies\": {{\n    \"vite\": \"^5.0.0\",\n    \"@vitejs/plugin-react\": \"^4.0.0\"\n  }}\n}}\n",
             "README.md": "# {name}\n\nA new React + Vite project.\n",
             "index.html": (
                 '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n'
