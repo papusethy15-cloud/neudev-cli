@@ -12,27 +12,12 @@ TEMPLATES: dict[str, dict[str, str | list[str]]] = {
         "description": "Python project with pyproject.toml, src layout, and tests",
         "directories": ["src", "tests", "docs"],
         "files": {
-            "pyproject.toml": """[build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "{name}"
-version = "0.1.0"
-description = ""
-readme = "README.md"
-requires-python = ">=3.10"
-""",
+            "pyproject.toml": '[build-system]\nrequires = ["setuptools>=68.0", "wheel"]\nbuild-backend = "setuptools.build_meta"\n\n[project]\nname = "{name}"\nversion = "0.1.0"\ndescription = ""\nreadme = "README.md"\nrequires-python = ">=3.10"\n',
             "README.md": "# {name}\n\nA new Python project.\n",
             "src/__init__.py": "",
             "tests/__init__.py": "",
-            "tests/test_placeholder.py": (
-                'def test_placeholder():\n    """Placeholder test."""\n    assert True\n'
-            ),
-            ".gitignore": (
-                "__pycache__/\n*.pyc\n*.pyo\n.venv/\nvenv/\n"
-                "dist/\n*.egg-info/\n.pytest_cache/\n.mypy_cache/\n"
-            ),
+            "tests/test_placeholder.py": 'def test_placeholder():\n    """Placeholder test."""\n    assert True\n',
+            ".gitignore": "__pycache__/\n*.pyc\n*.pyo\n.venv/\nvenv/\ndist/\n*.egg-info/\n.pytest_cache/\n.mypy_cache/\n",
         },
     },
     "node": {
@@ -75,28 +60,14 @@ requires-python = ">=3.10"
         "description": "FastAPI project with app structure",
         "directories": ["app", "app/routers", "tests"],
         "files": {
-            "pyproject.toml": """[build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "{name}"
-version = "0.1.0"
-dependencies = ["fastapi>=0.110.0", "uvicorn>=0.29.0"]
-""",
+            "pyproject.toml": '[build-system]\nrequires = ["setuptools>=68.0"]\nbuild-backend = "setuptools.build_meta"\n\n[project]\nname = "{name}"\nversion = "0.1.0"\ndependencies = ["fastapi>=0.110.0", "uvicorn>=0.29.0"]\n',
             "requirements.txt": "fastapi>=0.110.0\nuvicorn>=0.29.0\n",
             "README.md": "# {name}\n\nA new FastAPI project.\n",
             "app/__init__.py": "",
-            "app/main.py": (
-                "from fastapi import FastAPI\n\napp = FastAPI(title=\"{name}\")\n\n\n"
-                "@app.get(\"/\")\ndef root():\n    return {\"message\": \"Hello from {name}!\"}\n"
-            ),
+            "app/main.py": "from fastapi import FastAPI\n\napp = FastAPI(title=\"{name}\")\n\n\n@app.get(\"/\")\ndef root():\n    return {\"message\": \"Hello from {name}!\"}\n",
             "app/routers/__init__.py": "",
             "tests/__init__.py": "",
-            ".gitignore": (
-                "__pycache__/\n*.pyc\n.venv/\nvenv/\n.env\n"
-                "*.egg-info/\n.pytest_cache/\n"
-            ),
+            ".gitignore": "__pycache__/\n*.pyc\n.venv/\nvenv/\n.env\n*.egg-info/\n.pytest_cache/\n",
         },
     },
 }
