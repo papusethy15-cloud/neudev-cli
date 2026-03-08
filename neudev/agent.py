@@ -129,6 +129,8 @@ Choose tools based on your task type for optimal results:
 - If visible thinking is requested, keep it concise and in {response_language}
 - Do not expose internal scratchpad text, chain-of-thought, or tool-planning narration in the final answer
 - When you need tools, call them directly instead of narrating your internal process to the user
+- NEVER output tool request syntax like `<tool_request>` or `{"name": ...}` in your final response - only use native tool calls
+- Your final response should be natural language summarizing what was accomplished, not tool calls
 
 ## Tool Calling
 - Use native tool calling when the model supports it

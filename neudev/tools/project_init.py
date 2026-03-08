@@ -116,7 +116,10 @@ class ProjectInitTool(BaseTool):
             f"Scaffold a new project structure from a template. "
             f"Available templates: {templates}. "
             f"Creates directory layout, config files, and README. "
-            f"Will not overwrite existing files."
+            f"Will not overwrite existing files. "
+            f"USAGE: Call with template='react' or 'python' or 'node' or 'fastapi', "
+            f"name='your-project-name', and optionally directory='.' for current workspace. "
+            f"Example: project_init(template='react', name='my-app', directory='.')"
         )
 
     @property
@@ -126,15 +129,16 @@ class ProjectInitTool(BaseTool):
             "properties": {
                 "template": {
                     "type": "string",
-                    "description": f"Project template: {', '.join(TEMPLATES.keys())}",
+                    "description": f"Project template to use. MUST be one of: {', '.join(TEMPLATES.keys())}. Example: 'react', 'python', 'node', 'fastapi'",
                 },
                 "name": {
                     "type": "string",
-                    "description": "Project name (used for package.json, pyproject.toml, etc.)",
+                    "description": "Project name (used for package.json, pyproject.toml, etc.). Example: 'my-app', 'travel-website'",
                 },
                 "directory": {
                     "type": "string",
-                    "description": "Directory to scaffold in (defaults to workspace root).",
+                    "description": "Directory to scaffold in. Use '.' for workspace root, or a subdirectory name like 'my-project'. Defaults to workspace root.",
+                    "default": ".",
                 },
             },
             "required": ["template", "name"],
@@ -154,22 +158,30 @@ class ProjectInitTool(BaseTool):
         self,
         template: str,
         name: str,
-        directory: str = "",
+        directory: str = ".",
         **kwargs,
     ) -> str:
         template_key = template.strip().lower()
         if template_key not in TEMPLATES:
             raise ToolError(
                 f"Unknown template: {template}. "
-                f"Available: {', '.join(TEMPLATES.keys())}"
+                f"Available templates are: {', '.join(TEMPLATES.keys())}. "
+                f"Example usage: project_init(template='react', name='my-app', directory='.')"
             )
 
         if not name or not name.strip():
-            raise ToolError("Project name is required.")
+            raise ToolError("Project name is required. Example: project_init(template='react', name='my-app')")
+
+        # Validate directory parameter - reject obvious mistakes
+        directory = directory.strip() if directory else "."
+        invalid_directory_values = ["/path/to/workspace", "workspace_root", "workspace", ".", "./", ""]
+        if directory in invalid_directory_values or directory.startswith("/path"):
+            # Use workspace root instead
+            base = Path(self.workspace) if self.workspace else Path.cwd()
+        else:
+            base = self.resolve_directory(directory if directory != "." else None)
 
         name = name.strip()
-        base = self.resolve_directory(directory or None)
-
         tmpl = TEMPLATES[template_key]
         created_dirs: list[str] = []
         created_files: list[str] = []
