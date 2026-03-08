@@ -550,6 +550,33 @@ class Agent:
         stop_event=None,
     ) -> str:
         """Execute a tool, optionally allowing related-tool fallback."""
+        
+        # HARD CONSTRAINT: Prevent duplicate project_init calls
+        if name == "project_init":
+            project_init_count = sum(
+                1 for action in self.session.actions 
+                if action.action == "tool" and "project_init" in str(action.target)
+            )
+            if project_init_count >= 1:
+                return (
+                    "⚠️ BLOCKED: project_init was already called in this session.\n"
+                    "DO NOT call project_init again. Use write_file to create/overwrite index.html, styles.css, script.js with custom content.\n"
+                    "The project structure already exists - now customize the files for the user's specific requirements."
+                )
+        
+        # HARD CONSTRAINT: Limit excessive list_directory calls
+        if name == "list_directory":
+            recent_list_dir_count = sum(
+                1 for action in self.session.actions[-10:]  # Last 10 actions
+                if action.action == "tool" and "list_directory" in str(action.target)
+            )
+            if recent_list_dir_count >= 3:
+                return (
+                    "⚠️ BLOCKED: Too many list_directory calls recently.\n"
+                    "You've already scanned the directory structure. Stop scanning and start IMPLEMENTING.\n"
+                    "Use write_file/edit_file to create or customize files based on the user's request."
+                )
+        
         tool = self.tool_registry.get(name)
         if tool is None:
             return f"Error: Unknown tool '{name}'"

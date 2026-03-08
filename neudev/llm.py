@@ -77,12 +77,12 @@ class OllamaClient:
                 f"Error: {e}"
             )
 
-    def _api_get(self, endpoint: str) -> dict:
+    def _api_get(self, endpoint: str, timeout: int = 10) -> dict:
         """Make a GET request to Ollama API."""
         url = f"{self.base_url}{endpoint}"
         try:
             req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.URLError as e:
             raise ConnectionError(f"Cannot connect to Ollama: {e}")
@@ -445,7 +445,14 @@ class OllamaClient:
         if self._models_cache is not None and (now - self._models_cache_time) < self._models_cache_ttl:
             return [dict(m) for m in self._models_cache]
 
-        response = self._api_get("/api/tags")
+        try:
+            response = self._api_get("/api/tags", timeout=5)  # 5 second timeout
+        except Exception as e:
+            # Return cached models if available, otherwise return empty list
+            if self._models_cache:
+                return [dict(m) for m in self._models_cache]
+            raise LLMError(f"Failed to fetch models from Ollama: {e}")
+        
         models = []
         for m in response.get("models", []):
             name = m.get("name", "unknown")
