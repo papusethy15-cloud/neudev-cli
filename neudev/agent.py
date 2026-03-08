@@ -552,11 +552,15 @@ class Agent:
         """Execute a tool, optionally allowing related-tool fallback."""
         
         # HARD CONSTRAINT: Prevent duplicate project_init calls
+        # Check conversation history for tool calls (more reliable than session actions)
         if name == "project_init":
-            project_init_count = sum(
-                1 for action in self.session.actions 
-                if action.action == "tool" and "project_init" in str(action.target)
-            )
+            project_init_count = 0
+            for msg in self.conversation:
+                if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    for tc in msg["tool_calls"]:
+                        if tc.get("function", {}).get("name") == "project_init":
+                            project_init_count += 1
+            
             if project_init_count >= 1:
                 return (
                     "⚠️ BLOCKED: project_init was already called in this session.\n"
@@ -566,10 +570,14 @@ class Agent:
         
         # HARD CONSTRAINT: Limit excessive list_directory calls
         if name == "list_directory":
-            recent_list_dir_count = sum(
-                1 for action in self.session.actions[-10:]  # Last 10 actions
-                if action.action == "tool" and "list_directory" in str(action.target)
-            )
+            recent_list_dir_count = 0
+            # Check last 10 conversation messages with tool calls
+            recent_msgs = [m for m in self.conversation if m.get("role") == "assistant" and m.get("tool_calls")][-10:]
+            for msg in recent_msgs:
+                for tc in msg.get("tool_calls", []):
+                    if tc.get("function", {}).get("name") == "list_directory":
+                        recent_list_dir_count += 1
+            
             if recent_list_dir_count >= 3:
                 return (
                     "⚠️ BLOCKED: Too many list_directory calls recently.\n"
@@ -1411,11 +1419,16 @@ class Agent:
         # Extract the actual user request from the conversation
         user_request = self._extract_user_request(messages)
         
-        # Check if project_init was already called in this session
-        project_init_called = any(
-            action.action == "tool" and "project_init" in str(action.target)
-            for action in self.session.actions
-        )
+        # Check if project_init was already called (check conversation history)
+        project_init_called = False
+        for msg in self.conversation:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    if tc.get("function", {}).get("name") == "project_init":
+                        project_init_called = True
+                        break
+            if project_init_called:
+                break
 
         planner_messages = [
             {
