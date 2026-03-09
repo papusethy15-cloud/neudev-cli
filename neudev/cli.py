@@ -2090,10 +2090,7 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
             ("Command Policy", command_policy_display),
         ],
     )
-    console.print(
-        "  [dim]NeuDev will show each phase, tool action, and verification step below in real time. "
-        "Use /stop to request cancellation. While work is active, use `/queue add <message>` for intentional follow-ups.[/dim]"
-    )
+    # Don't print instruction text when using enhanced UI - it will be shown in dashboard
     console.print()
     thinking_parts: list[str] = []
     response = ""

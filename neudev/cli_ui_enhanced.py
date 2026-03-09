@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -304,18 +305,39 @@ def build_enhanced_full_dashboard(trace: EnhancedTraceState) -> list:
 def run_enhanced_live_dashboard(trace: EnhancedTraceState, runner) -> None:
     """Run enhanced live dashboard during agent execution."""
     stop_event = threading.Event()
-    
+    last_update_time = 0
+    last_dashboard_hash = ""
+
     def refresh_loop(live: Live) -> None:
+        nonlocal last_update_time, last_dashboard_hash
         while not stop_event.is_set():
+            # Throttle updates to 4 FPS to prevent terminal blinking
+            current_time = time.time()
+            if current_time - last_update_time < 0.25:  # 250ms minimum between updates
+                stop_event.wait(0.05)
+                continue
+            
             dashboard = build_enhanced_full_dashboard(trace)
-            # Group panels vertically
-            from rich.console import Group
-            live.update(Group(*dashboard), refresh=True)
-            stop_event.wait(0.15)  # ~7 FPS
-    
+            # Only update if content changed (prevents flickering)
+            dashboard_str = str(dashboard)
+            if dashboard_str != last_dashboard_hash:
+                from rich.console import Group
+                live.update(Group(*dashboard), refresh=True)
+                last_dashboard_hash = dashboard_str
+                last_update_time = current_time
+            stop_event.wait(0.05)
+
     dashboard = build_enhanced_full_dashboard(trace)
     from rich.console import Group
-    with Live(Group(*dashboard), console=console, refresh_per_second=7, transient=True) as live:
+    # Use redirect_stdout=False to prevent conflicts with other output
+    with Live(
+        Group(*dashboard),
+        console=console,
+        refresh_per_second=4,  # Reduced from 7 to 4 FPS
+        transient=True,
+        redirect_stdout=False,
+        redirect_stderr=False,
+    ) as live:
         worker = threading.Thread(target=refresh_loop, args=(live,), daemon=True)
         worker.start()
         try:
