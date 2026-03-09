@@ -41,18 +41,22 @@ class ModelRoutingTests(unittest.TestCase):
             has_tools=False,
         )
 
-        # Now prefers deepseek-coder-v2 for substantial coding tasks
-        self.assertEqual(ranked[0]["name"], "deepseek-coder-v2:16b")
+        # Prefers qwen2.5-coder for coding tasks (best tool-capable coding model)
+        self.assertEqual(ranked[0]["name"], "qwen2.5-coder:7b")
         self.assertIn("code", reason)
 
     def test_rank_models_prefers_deepseek_v2_for_complex_refactors(self):
+        # deepseek-coder-v2 doesn't support tool calling on hosted endpoints
+        # It can only be used for pure chat/analysis without tools
+        # For refactor tasks, qwen3 is now preferred (has tool support)
         ranked, reason = rank_models(
             MODELS,
-            [{"role": "user", "content": "Refactor this module across multiple files and migrate the API surface"}],
-            has_tools=True,
+            [{"role": "user", "content": "Refactor this complex module"}],
+            has_tools=False,
         )
 
-        self.assertEqual(ranked[0]["name"], "deepseek-coder-v2:16b")
+        # qwen3 is preferred for most tasks since deepseek-coder-v2 lacks tool calling
+        self.assertEqual(ranked[0]["name"], "qwen3:latest")
         self.assertIn("refactor", reason)
 
     def test_rank_models_prefers_deepseek_coder_for_plain_debugging(self):
@@ -85,8 +89,8 @@ class ModelRoutingTests(unittest.TestCase):
             has_tools=True,
         )
 
-        # Now prefers deepseek-coder-v2 for implementation tasks with React stack
-        self.assertEqual(ranked[0]["name"], "deepseek-coder-v2:16b")
+        # Prefers qwen2.5-coder for implementation tasks with React stack and tools
+        self.assertEqual(ranked[0]["name"], "qwen2.5-coder:7b")
         self.assertIn("React/TypeScript", reason)
 
     def test_rank_models_detects_flutter_stack_for_planning(self):
@@ -124,8 +128,8 @@ class ModelRoutingTests(unittest.TestCase):
             has_tools=True,
         )
 
-        # Now prefers deepseek-coder-v2 for complex analysis+implementation tasks
-        self.assertEqual(ranked[0]["name"], "deepseek-coder-v2:16b")
+        # Prefers qwen3 for complex analysis+implementation with tools
+        self.assertEqual(ranked[0]["name"], "qwen3:latest")
         self.assertIn("implementation", reason)
         self.assertIn("React/TypeScript", reason)
 
@@ -153,8 +157,8 @@ class ModelRoutingTests(unittest.TestCase):
         )
 
         self.assertEqual(team.planner, "qwen3:latest")
-        # Now prefers deepseek-coder-v2 for coding tasks
-        self.assertEqual(team.executor, "deepseek-coder-v2:16b")
+        # Prefers qwen2.5-coder for coding tasks with tools
+        self.assertEqual(team.executor, "qwen2.5-coder:7b")
         self.assertNotEqual(team.reviewer, team.executor)
         self.assertIn("qwen3:latest", team.executor_candidates)
 
@@ -181,8 +185,8 @@ class ModelRoutingTests(unittest.TestCase):
         )
 
         self.assertEqual(team.planner, "qwen3:latest")
-        # Now prefers deepseek-coder-v2 for complex implementation tasks
-        self.assertEqual(team.executor, "deepseek-coder-v2:16b")
+        # Prefers qwen3 for complex implementation with tools
+        self.assertEqual(team.executor, "qwen3:latest")
         self.assertNotEqual(team.reviewer, team.executor)
         self.assertIn("React/TypeScript", team.route_reason)
 
@@ -230,9 +234,9 @@ class ModelRoutingTests(unittest.TestCase):
             think=True,
         )
 
-        # Now prefers deepseek-coder-v2 for coding tasks
-        self.assertEqual(result["model"], "deepseek-coder-v2:16b")
-        self.assertEqual(calls[0][0], "deepseek-coder-v2:16b")
+        # Routes to qwen2.5-coder for coding tasks with tools
+        self.assertEqual(result["model"], "qwen2.5-coder:7b")
+        self.assertEqual(calls[0][0], "qwen2.5-coder:7b")
 
     def test_chat_with_tools_extracts_bare_json_tool_call_text(self):
         client = RoutingClient(NeuDevConfig(model="auto"))

@@ -21,6 +21,7 @@ class ModelTraits:
     chat_capable: bool
     supports_thinking: bool
     stable_thinking: bool
+    tool_calling_capable: bool = True  # Whether model supports native tool calling
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,7 @@ MODEL_RULES: list[tuple[str, ModelTraits]] = [
             chat_capable=True,
             supports_thinking=True,
             stable_thinking=False,
+            tool_calling_capable=False,  # Hosted endpoint doesn't support tool calling for this model
         ),
     ),
     (
@@ -135,6 +137,7 @@ MODEL_RULES: list[tuple[str, ModelTraits]] = [
             chat_capable=True,
             supports_thinking=False,
             stable_thinking=False,
+            tool_calling_capable=False,  # Does not support native tool calling
         ),
     ),
     (
@@ -306,6 +309,10 @@ def rank_models(
         name = model.get("name", "unknown")
         traits = get_model_traits(name)
         if not traits.chat_capable:
+            continue
+        
+        # CRITICAL: Filter out models that don't support tool calling when tools are needed
+        if has_tools and not traits.tool_calling_capable:
             continue
 
         enriched = dict(model)
@@ -541,31 +548,32 @@ def _score_model_for_task(
 
 def _task_preference_order(task_type: str, has_tools: bool) -> tuple[str, ...]:
     if task_type == "planning":
-        return ("qwen3", "deepseek-coder-v2", "qwen2.5-coder", "deepseek-coder", "codellama", "starcoder2")
+        return ("qwen3", "qwen2.5-coder", "deepseek-coder", "codellama", "starcoder2")
     if task_type == "analysis_implementation":
-        # For complex multi-step tasks, prefer stronger models
-        return ("deepseek-coder-v2", "qwen2.5-coder", "qwen3", "deepseek-coder", "starcoder2", "codellama")
+        # For complex multi-step tasks, prefer qwen3 for planning+coding with tools
+        return ("qwen3", "qwen2.5-coder", "deepseek-coder", "starcoder2", "codellama")
     if task_type == "main_coding":
-        # For substantial coding tasks (websites, features), prefer deepseek-coder-v2 for better quality
-        return ("deepseek-coder-v2", "qwen2.5-coder", "qwen3", "deepseek-coder", "starcoder2", "codellama")
+        # For substantial coding tasks, prefer qwen2.5-coder (best tool-capable coding model)
+        return ("qwen2.5-coder", "qwen3", "deepseek-coder", "starcoder2", "codellama")
     if task_type == "website_creation":
-        # Website creation needs strong multi-file coding - use best coding model
-        return ("deepseek-coder-v2", "qwen2.5-coder", "qwen3", "deepseek-coder", "starcoder2", "codellama")
+        # Website creation needs strong multi-file coding with tool support
+        return ("qwen2.5-coder", "qwen3", "deepseek-coder", "starcoder2", "codellama")
     if task_type == "complex_refactor":
-        return ("deepseek-coder-v2", "qwen3", "qwen2.5-coder", "deepseek-coder", "codellama", "starcoder2")
+        # Refactoring needs reasoning - use qwen3 for tool-based refactors
+        return ("qwen3", "qwen2.5-coder", "deepseek-coder", "codellama", "starcoder2")
     if task_type == "debugging":
         if has_tools:
-            return ("qwen3", "deepseek-coder-v2", "deepseek-coder", "qwen2.5-coder", "starcoder2", "codellama")
-        return ("deepseek-coder", "deepseek-coder-v2", "qwen3", "qwen2.5-coder", "starcoder2", "codellama")
+            return ("qwen3", "deepseek-coder", "qwen2.5-coder", "starcoder2", "codellama")
+        return ("deepseek-coder", "qwen3", "qwen2.5-coder", "starcoder2", "codellama")
     if task_type == "quick_edit":
         if has_tools:
             return ("qwen2.5-coder", "qwen3", "starcoder2", "deepseek-coder", "codellama")
         return ("starcoder2", "qwen2.5-coder", "qwen3", "deepseek-coder", "codellama")
     if task_type == "code_search":
-        return ("qwen3", "qwen2.5-coder", "deepseek-coder-v2", "deepseek-coder", "codellama", "starcoder2")
+        return ("qwen3", "qwen2.5-coder", "deepseek-coder", "codellama", "starcoder2")
     if has_tools:
-        return ("qwen3", "qwen2.5-coder", "deepseek-coder-v2", "deepseek-coder", "codellama", "starcoder2")
-    return ("qwen3", "qwen2.5-coder", "deepseek-coder-v2", "deepseek-coder", "starcoder2", "codellama")
+        return ("qwen3", "qwen2.5-coder", "deepseek-coder", "codellama", "starcoder2")
+    return ("qwen3", "qwen2.5-coder", "deepseek-coder", "starcoder2", "codellama")
 
 
 def _task_trait_weights(task_type: str, has_tools: bool) -> tuple[float, float, float]:
