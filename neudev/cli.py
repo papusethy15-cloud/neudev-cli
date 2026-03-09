@@ -362,7 +362,7 @@ def _record_trace_workspace_change(trace: ExecutionTraceState | None, changes: d
             trace.workspace_delta_counts[label] += len(changes.get(label) or [])
 
 
-def _record_trace_tool_event(trace: ExecutionTraceState | None, tool_name: str, payload: dict | None) -> None:
+def _record_trace_tool_event(trace: EnhancedTraceState | None, tool_name: str, payload: dict | None) -> None:
     """Track tool usage and touched files for the turn summary."""
     if trace is None:
         return
@@ -381,7 +381,6 @@ def _record_trace_tool_event(trace: ExecutionTraceState | None, tool_name: str, 
     with trace.lock:
         if event_type == "start":
             trace.tool_counts[tool_name] = trace.tool_counts.get(tool_name, 0) + 1
-            _append_unique(trace.touched_targets, target_text)
             trace.current_tool = tool_name
             trace.current_target = target_text
             trace.current_detail = f"{_tool_activity_verb(activity_label)} {target_text or tool_name}"
@@ -416,7 +415,7 @@ def _record_trace_tool_event(trace: ExecutionTraceState | None, tool_name: str, 
         trace.waiting_for_model = False
 
 
-def _record_trace_progress(trace: ExecutionTraceState | None, payload: dict | None) -> None:
+def _record_trace_progress(trace: EnhancedTraceState | None, payload: dict | None) -> None:
     """Store model-wait and step-detail updates for the live panel."""
     if trace is None or not payload:
         return
@@ -427,6 +426,9 @@ def _record_trace_progress(trace: ExecutionTraceState | None, payload: dict | No
     with trace.lock:
         if phase:
             trace.current_phase = phase
+            # Track phases for compatibility
+            if phase.upper() not in trace.phases:
+                trace.phases.append(phase.upper())
         if model:
             trace.current_model = model
         if event_type == "model_wait":

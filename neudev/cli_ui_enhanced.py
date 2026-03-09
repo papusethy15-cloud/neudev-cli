@@ -58,6 +58,14 @@ class EnhancedTraceState:
     successful_tools: int = 0
     failed_tools: int = 0
     
+    # Compatibility with old ExecutionTraceState
+    phases: list = field(default_factory=list)
+    tool_counts: dict = field(default_factory=dict)
+    plan_completed: int = 0
+    plan_total: int = 0
+    active_plan_item: str = ""
+    custom_fields: dict = field(default_factory=dict)
+    
     def elapsed_seconds(self) -> float:
         """Get elapsed time since start."""
         return (datetime.now() - self.start_time).total_seconds()
