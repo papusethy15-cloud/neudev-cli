@@ -239,6 +239,20 @@ SEARCH_KEYWORDS = {
     "code search",
     "look up",
 }
+# Website creation is a complex multi-file task that needs strong coding ability
+WEBSITE_KEYWORDS = {
+    "website",
+    "web page",
+    "landing page",
+    "single page",
+    "html",
+    "css",
+    "javascript",
+    "responsive",
+    "travel website",
+    "portfolio",
+    "blog",
+}
 STACK_HINTS: list[tuple[str, set[str]]] = [
     ("React", {"react", "next.js", "nextjs", "jsx", "tsx", "vite"}),
     ("TypeScript", {"typescript", "tsx", ".ts", "tsconfig"}),
@@ -395,6 +409,7 @@ def _classify_task(user_text: str, has_tools: bool) -> TaskDecision:
     - Position-weighted scoring (earlier keywords matter more)
     - Phrase boosting for multi-word indicators
     - Hybrid task detection with confidence scoring
+    - Website creation detection for complex multi-file tasks
     """
     text = user_text.lower()
     words = text.split()
@@ -406,6 +421,7 @@ def _classify_task(user_text: str, has_tools: bool) -> TaskDecision:
     debug_hits = _keyword_hits(text, DEBUG_KEYWORDS)
     quick_hits = _keyword_hits(text, QUICK_EDIT_KEYWORDS)
     search_hits = _keyword_hits(text, SEARCH_KEYWORDS)
+    website_hits = _keyword_hits(text, WEBSITE_KEYWORDS)
 
     # Position-weighted bonus: keywords in first 5 words get 1.5x multiplier
     first_words = set(words[:5])
@@ -414,6 +430,7 @@ def _classify_task(user_text: str, has_tools: bool) -> TaskDecision:
         "coding": sum(1.5 for w in first_words if w in CODING_KEYWORDS),
         "refactor": sum(1.5 for w in first_words if w in REFACTOR_KEYWORDS),
         "debug": sum(1.5 for w in first_words if w in DEBUG_KEYWORDS),
+        "website": sum(1.5 for w in first_words if w in WEBSITE_KEYWORDS),
     }
 
     # Phrase boosting: detect multi-word patterns
@@ -425,6 +442,11 @@ def _classify_task(user_text: str, has_tools: bool) -> TaskDecision:
     elif "fix" in text and ("bug" in text or "issue" in text or "error" in text):
         phrase_boost = 1.5
 
+    # Website creation is a complex multi-file task - boost it high
+    website_score = (website_hits * 2.5) + position_bonus["website"]
+    if website_hits >= 2:
+        website_score += 5.0  # Strong signal for website creation
+
     # Weighted scoring with position bonuses
     scores: dict[str, float] = {
         "complex_refactor": (refactor_hits * 2.0) + position_bonus["refactor"],
@@ -433,6 +455,7 @@ def _classify_task(user_text: str, has_tools: bool) -> TaskDecision:
         "main_coding": (coding_hits * 1.2) + position_bonus["coding"],
         "debugging": (debug_hits * 1.3) + position_bonus["debug"] + phrase_boost,
         "code_search": search_hits * 1.0,
+        "website_creation": website_score,
     }
 
     # Mixed planning+coding → dedicated hybrid type with phrase boost
@@ -465,6 +488,7 @@ def _classify_task(user_text: str, has_tools: bool) -> TaskDecision:
         "debugging": "debugging and bug fixing",
         "main_coding": "code generation and editing",
         "code_search": "code search and repository navigation",
+        "website_creation": "website creation with HTML/CSS/JS - complex multi-file implementation",
     }
     return TaskDecision(best_type, REASON_MAP.get(best_type, "general task"))
 
@@ -519,9 +543,14 @@ def _task_preference_order(task_type: str, has_tools: bool) -> tuple[str, ...]:
     if task_type == "planning":
         return ("qwen3", "deepseek-coder-v2", "qwen2.5-coder", "deepseek-coder", "codellama", "starcoder2")
     if task_type == "analysis_implementation":
-        return ("qwen2.5-coder", "qwen3", "deepseek-coder-v2", "deepseek-coder", "starcoder2", "codellama")
+        # For complex multi-step tasks, prefer stronger models
+        return ("deepseek-coder-v2", "qwen2.5-coder", "qwen3", "deepseek-coder", "starcoder2", "codellama")
     if task_type == "main_coding":
-        return ("qwen2.5-coder", "deepseek-coder-v2", "qwen3", "deepseek-coder", "starcoder2", "codellama")
+        # For substantial coding tasks (websites, features), prefer deepseek-coder-v2 for better quality
+        return ("deepseek-coder-v2", "qwen2.5-coder", "qwen3", "deepseek-coder", "starcoder2", "codellama")
+    if task_type == "website_creation":
+        # Website creation needs strong multi-file coding - use best coding model
+        return ("deepseek-coder-v2", "qwen2.5-coder", "qwen3", "deepseek-coder", "starcoder2", "codellama")
     if task_type == "complex_refactor":
         return ("deepseek-coder-v2", "qwen3", "qwen2.5-coder", "deepseek-coder", "codellama", "starcoder2")
     if task_type == "debugging":
@@ -553,6 +582,9 @@ def _task_trait_weights(task_type: str, has_tools: bool) -> tuple[float, float, 
         return (1.7, 1.3, (1.1 if has_tools else 0.3))
     if task_type == "main_coding":
         return (1.9, 0.8, (0.8 if has_tools else 0.2))
+    if task_type == "website_creation":
+        # Website creation needs strong coding ability with multi-file coordination
+        return (2.0, 0.9, (0.9 if has_tools else 0.3))
     if task_type == "complex_refactor":
         return (1.7, 1.5, (0.8 if has_tools else 0.2))
     if task_type == "debugging":

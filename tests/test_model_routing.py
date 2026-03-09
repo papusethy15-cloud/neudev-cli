@@ -41,7 +41,8 @@ class ModelRoutingTests(unittest.TestCase):
             has_tools=False,
         )
 
-        self.assertEqual(ranked[0]["name"], "qwen2.5-coder:7b")
+        # Now prefers deepseek-coder-v2 for substantial coding tasks
+        self.assertEqual(ranked[0]["name"], "deepseek-coder-v2:16b")
         self.assertIn("code", reason)
 
     def test_rank_models_prefers_deepseek_v2_for_complex_refactors(self):
@@ -84,7 +85,8 @@ class ModelRoutingTests(unittest.TestCase):
             has_tools=True,
         )
 
-        self.assertEqual(ranked[0]["name"], "qwen2.5-coder:7b")
+        # Now prefers deepseek-coder-v2 for implementation tasks with React stack
+        self.assertEqual(ranked[0]["name"], "deepseek-coder-v2:16b")
         self.assertIn("React/TypeScript", reason)
 
     def test_rank_models_detects_flutter_stack_for_planning(self):
@@ -122,7 +124,8 @@ class ModelRoutingTests(unittest.TestCase):
             has_tools=True,
         )
 
-        self.assertEqual(ranked[0]["name"], "qwen2.5-coder:7b")
+        # Now prefers deepseek-coder-v2 for complex analysis+implementation tasks
+        self.assertEqual(ranked[0]["name"], "deepseek-coder-v2:16b")
         self.assertIn("implementation", reason)
         self.assertIn("React/TypeScript", reason)
 
@@ -150,7 +153,8 @@ class ModelRoutingTests(unittest.TestCase):
         )
 
         self.assertEqual(team.planner, "qwen3:latest")
-        self.assertEqual(team.executor, "qwen2.5-coder:7b")
+        # Now prefers deepseek-coder-v2 for coding tasks
+        self.assertEqual(team.executor, "deepseek-coder-v2:16b")
         self.assertNotEqual(team.reviewer, team.executor)
         self.assertIn("qwen3:latest", team.executor_candidates)
 
@@ -177,7 +181,8 @@ class ModelRoutingTests(unittest.TestCase):
         )
 
         self.assertEqual(team.planner, "qwen3:latest")
-        self.assertEqual(team.executor, "qwen2.5-coder:7b")
+        # Now prefers deepseek-coder-v2 for complex implementation tasks
+        self.assertEqual(team.executor, "deepseek-coder-v2:16b")
         self.assertNotEqual(team.reviewer, team.executor)
         self.assertIn("React/TypeScript", team.route_reason)
 
@@ -225,8 +230,9 @@ class ModelRoutingTests(unittest.TestCase):
             think=True,
         )
 
-        self.assertEqual(result["model"], "qwen2.5-coder:7b")
-        self.assertEqual(calls[0][0], "qwen2.5-coder:7b")
+        # Now prefers deepseek-coder-v2 for coding tasks
+        self.assertEqual(result["model"], "deepseek-coder-v2:16b")
+        self.assertEqual(calls[0][0], "deepseek-coder-v2:16b")
 
     def test_chat_with_tools_extracts_bare_json_tool_call_text(self):
         client = RoutingClient(NeuDevConfig(model="auto"))

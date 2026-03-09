@@ -18,6 +18,13 @@ Auto-approved: project_init
 (repeated 11 times)
 ```
 
+### Additional Issues Found
+1. **Wrong Model Selection**: Only using `qwen2.5-coder:7b`, not using `deepseek-coder-v2:16b` (better coding model)
+2. **Path Hallucination**: Executor using placeholder paths like `path/to/your/file` from tool descriptions
+3. **edit_file Misuse**: Missing parameters, wrong file paths, TypeError errors
+4. **write_file Not Using overwrite=true**: Can't update existing files after scaffolding
+5. **Planner TODOs Still Vague**: "Scaffold HTML/CSS/JS structure" is still somewhat tool-focused
+
 ## Root Cause Analysis
 
 ### 1. Planner Creating Tool-Specific TODO Items
@@ -36,6 +43,16 @@ The agent had no mechanism to detect when the same tool was being called repeate
 When `project_init` ran a second time, it would skip existing files but the output message didn't clearly tell the executor:
 - "Files already exist - do NOT call this tool again"
 - "Use write_file or edit_file to customize instead"
+
+### 4. Model Routing Not Optimal
+- `qwen2.5-coder:7b` was being selected for all coding tasks
+- `deepseek-coder-v2:16b` (coding score 9.9) has better multi-file coordination ability
+- Website creation needs strong coding ability but wasn't being routed to best model
+
+### 5. Path Hallucination
+- Executor model was using placeholder paths from tool descriptions (`path/to/your/file`)
+- No explicit warning in system prompt against using example paths
+- Weaker model (`qwen2.5-coder:7b`) more prone to hallucination
 
 ## Fixes Applied
 
@@ -145,6 +162,58 @@ def _check_tool_loop(self, tool_name: str, tool_args: dict) -> bool:
   - "CRITICAL: TODO items must describe OUTCOMES (what to build), not TOOL CALLS (how to build)."
   - "Example: Write 'Create index.html with Travel GO branding' NOT 'Run project_init'."
 
+### Fix 6: Improved Model Routing for Website Creation (`neudev/model_routing.py`)
+
+**Location:**
+- Lines 254-267: Added `WEBSITE_KEYWORDS` set for website task detection
+- Lines 408-495: Updated `_classify_task()` to detect website creation tasks
+- Lines 547-570: Added `website_creation` task type to preference order
+- Lines 581-595: Added `website_creation` trait weights (coding=2.0, reasoning=0.9, tool_use=0.9)
+
+**Changes:**
+- Added new `website_creation` task type with high scoring for website-related keywords
+- Website tasks now route to `deepseek-coder-v2:16b` (coding score 9.9) instead of `qwen2.5-coder:7b` (coding score 9.6)
+- Position-weighted scoring: website keywords in first 5 words get 1.5x multiplier
+- Phrase boosting: 2+ website keyword hits add +5.0 to score
+
+**Model Preference Order for website_creation:**
+1. `deepseek-coder-v2:16b` - Best for complex multi-file coding
+2. `qwen2.5-coder:7b` - Strong coding alternative
+3. `qwen3:latest` - Good generalist with tool use
+4. `deepseek-coder:6.7b` - Debugging specialist
+5. `starcoder2:7b` - Quick edits
+6. `codellama:7b` - Legacy fallback
+
+### Fix 7: System Prompt Updates to Prevent Path Hallucination (`neudev/agent.py`)
+
+**Location:**
+- Lines 75-94: Updated website creation tool selection strategy
+- Lines 145-155: Added critical rules about path hallucination
+
+**Changes:**
+- Added explicit warning: "Call project_init ONLY ONCE - it creates the same files each time"
+- Added write_file guidance: "use write_file(path='index.html', content=FULL_CONTENT, overwrite=true)"
+- Added CRITICAL warnings:
+  - "Use actual file paths like 'index.html', 'css/style.css', 'js/script.js'"
+  - "NEVER use placeholder paths like 'path/to/your/file' or 'your-file.html'"
+  - "When using edit_file or write_file, ALWAYS use real file paths from the workspace"
+- Added rules:
+  - "NEVER use placeholder or example paths from tool descriptions"
+  - "ALWAYS use real file paths that exist in the workspace or that you intend to create"
+  - "If you see 'path/to/...' in your thoughts, STOP - that's an example path, not a real file"
+
+### Fix 8: Updated Test Expectations (`tests/test_model_routing.py`)
+
+**Location:** Multiple test methods
+
+**Changes:**
+- Updated tests to expect `deepseek-coder-v2:16b` for coding tasks (was `qwen2.5-coder:7b`)
+- Tests now verify improved model routing for:
+  - Plain code generation
+  - React/TypeScript implementation
+  - Analysis + implementation tasks
+  - Agent team executor selection
+
 ## Testing
 
 All existing tests pass:
@@ -181,25 +250,35 @@ When a user requests: "please create a single page website using HTML,CSS and JS
 
 ## Files Modified
 
-1. `neudev/agent.py` - Planner instructions, loop detection, executor loop
+1. `neudev/agent.py` - Planner instructions, loop detection, executor loop, system prompt
 2. `neudev/tools/project_init.py` - Enhanced feedback, updated description
+3. `neudev/model_routing.py` - Website task detection, model preference order, trait weights
+4. `tests/test_model_routing.py` - Updated test expectations for new model routing
+5. `CLI_AGENT_LOOP_FIX.md` - Comprehensive documentation of the issue and fixes
 
 ## Future Improvements
 
-1. **Better executor model selection** - Use stronger model for website creation tasks
-2. **Visual progress indicator** - Show file creation status in real-time
-3. **Template customization** - Allow users to specify theme/colors in project_init
-4. **Post-scaffold preview** - Automatically open created website in browser
+1. **Visual progress indicator** - Show file creation status in real-time
+2. **Template customization** - Allow users to specify theme/colors in project_init
+3. **Post-scaffold preview** - Automatically open created website in browser
+4. **Model fallback on error** - Switch to stronger model if executor fails repeatedly
 
 ## Related Issues
 
-This fix addresses the core issue where:
+This fix addresses the core issues where:
 - AI agent creates folders and files but doesn't complete the website
-- Agent gets stuck in tool call loops
+- Agent gets stuck in tool call loops (project_init called 11+ times)
 - Maximum iterations reached without task completion
+- Wrong model selection (qwen2.5-coder:7b instead of deepseek-coder-v2:16b)
+- Path hallucination (using 'path/to/your/file' from tool descriptions)
+- edit_file misuse (missing parameters, wrong paths)
+- write_file not using overwrite=true for existing files
 
 The fix makes the agent more robust by:
-- Better planning (outcome-based TODOs)
-- Better feedback (clear "don't call again" messages)
-- Loop detection (automatic course correction)
-- Better tool descriptions (usage guidelines)
+- Better planning (outcome-based TODOs, not tool instructions)
+- Better feedback (clear "don't call again" messages from project_init)
+- Loop detection (automatic course correction after 3 repeated calls)
+- Better tool descriptions (usage guidelines in tool definition)
+- Better model routing (deepseek-coder-v2:16b for complex coding tasks)
+- Path hallucination prevention (explicit warnings in system prompt)
+- Website task detection (special handling for multi-file website creation)
