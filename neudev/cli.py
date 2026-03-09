@@ -28,6 +28,14 @@ from rich.theme import Theme
 
 from neudev import __app_name__, __version__
 from neudev.agent import Agent
+from neudev.cli_ui_enhanced import (
+    EnhancedTraceState,
+    run_enhanced_live_dashboard,
+    update_trace_from_plan_update,
+    update_trace_from_tool_start,
+    update_trace_from_tool_done,
+    update_trace_from_thinking,
+)
 from neudev.config import CONFIG_DIR, CONFIG_FILE, HISTORY_FILE, VALID_COMMAND_POLICIES, NeuDevConfig
 from neudev.hosted_llm import HostedLLMClient
 from neudev.llm import ConnectionError as OllamaConnectionError
@@ -1151,8 +1159,14 @@ def build_plan_panel_content(
     return "[bold bright_yellow]Plan Update[/bold bright_yellow]", lines
 
 
-def render_plan_panel(plan_update: dict | None, *, trace: ExecutionTraceState | None = None) -> None:
+def render_plan_panel(plan_update: dict | None, *, trace: EnhancedTraceState | None = None) -> None:
     """Render remote or local plan progress."""
+    # Update enhanced UI todo list
+    if trace and isinstance(trace, EnhancedTraceState) and plan_update:
+        plan_items = plan_update.get("plan", [])
+        conventions = plan_update.get("conventions", [])
+        update_trace_from_plan_update(trace, plan_items, conventions)
+    
     built = build_plan_panel_content(plan_update, trace=trace)
     if not built:
         return
@@ -2060,7 +2074,8 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
     """Process a local user message."""
     runtime_label = "hybrid" if agent.config.runtime_mode == "hybrid" else "local"
     command_policy_display = getattr(agent, "_command_policy_display", "unknown")
-    trace = ExecutionTraceState()
+    # Use EnhancedTraceState for advanced UI
+    trace = EnhancedTraceState()
     console.print()
     render_turn_header(
         user_input,
@@ -2084,6 +2099,9 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
     def handle_thinking(text: str) -> None:
         thinking_parts.append(text)
         _record_trace_thinking(trace, text)
+        # Update enhanced UI if available
+        if isinstance(trace, EnhancedTraceState):
+            update_trace_from_thinking(trace, text)
 
     def handle_text(text: str) -> None:
         _record_trace_response(trace, text)
@@ -2107,7 +2125,10 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
         )
 
     try:
-        if should_use_live_trace_panel():
+        # Use enhanced live dashboard if available
+        if isinstance(trace, EnhancedTraceState):
+            run_enhanced_live_dashboard(trace, run_turn)
+        elif should_use_live_trace_panel():
             _run_live_trace_panel(trace, run_turn)
         else:
             run_turn()
@@ -2711,7 +2732,8 @@ def process_remote_user_input(
 ) -> None:
     """Process a remote user message."""
     remote_snapshot = session.config_snapshot or {}
-    trace = ExecutionTraceState()
+    # Use EnhancedTraceState for advanced UI
+    trace = EnhancedTraceState()
     console.print()
     render_turn_header(
         user_input,
