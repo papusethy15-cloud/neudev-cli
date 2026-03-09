@@ -273,12 +273,18 @@ This fix addresses the core issues where:
 - Path hallucination (using 'path/to/your/file' from tool descriptions)
 - edit_file misuse (missing parameters, wrong paths)
 - write_file not using overwrite=true for existing files
+- **Agent being too passive** (asking user what to do instead of just doing it)
+- **Agent stopping after project_init** (not continuing to customize files)
+- **Agent asking "What content?"** (when request already specifies demo content)
 
 The fix makes the agent more robust by:
 - Better planning (outcome-based TODOs, not tool instructions)
 - Better feedback (clear "don't call again" messages from project_init)
 - Loop detection (automatic course correction after 3 repeated calls)
 - Better tool descriptions (usage guidelines in tool definition)
-- Better model routing (deepseek-coder-v2:16b for complex coding tasks)
+- Better model routing (qwen2.5-coder:7b for tool-capable coding tasks)
 - Path hallucination prevention (explicit warnings in system prompt)
 - Website task detection (special handling for multi-file website creation)
+- **Proactive behavior rules** (just DO THE WORK, don't ask unnecessary questions)
+- **Task completion enforcement** (continue after project_init to write_file)
+- **Demo content creation** (use knowledge to create appropriate content)
