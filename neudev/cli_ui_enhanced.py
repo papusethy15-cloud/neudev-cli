@@ -66,6 +66,8 @@ class EnhancedTraceState:
     plan_total: int = 0
     active_plan_item: str = ""
     custom_fields: dict = field(default_factory=dict)
+    touched_targets: list = field(default_factory=list)  # For compatibility
+    workspace_delta_counts: dict = field(default_factory=lambda: {"modified": 0, "created": 0, "deleted": 0})
     
     def elapsed_seconds(self) -> float:
         """Get elapsed time since start."""
@@ -303,48 +305,18 @@ def build_enhanced_full_dashboard(trace: EnhancedTraceState) -> list:
 
 
 def run_enhanced_live_dashboard(trace: EnhancedTraceState, runner) -> None:
-    """Run enhanced live dashboard during agent execution."""
-    stop_event = threading.Event()
-    last_update_time = 0
-    last_dashboard_hash = ""
-
-    def refresh_loop(live: Live) -> None:
-        nonlocal last_update_time, last_dashboard_hash
-        while not stop_event.is_set():
-            # Throttle updates to 4 FPS to prevent terminal blinking
-            current_time = time.time()
-            if current_time - last_update_time < 0.25:  # 250ms minimum between updates
-                stop_event.wait(0.05)
-                continue
-            
-            dashboard = build_enhanced_full_dashboard(trace)
-            # Only update if content changed (prevents flickering)
-            dashboard_str = str(dashboard)
-            if dashboard_str != last_dashboard_hash:
-                from rich.console import Group
-                live.update(Group(*dashboard), refresh=True)
-                last_dashboard_hash = dashboard_str
-                last_update_time = current_time
-            stop_event.wait(0.05)
-
-    dashboard = build_enhanced_full_dashboard(trace)
-    from rich.console import Group
-    # Use redirect_stdout=False to prevent conflicts with other output
-    with Live(
-        Group(*dashboard),
-        console=console,
-        refresh_per_second=4,  # Reduced from 7 to 4 FPS
-        transient=True,
-        redirect_stdout=False,
-        redirect_stderr=False,
-    ) as live:
-        worker = threading.Thread(target=refresh_loop, args=(live,), daemon=True)
-        worker.start()
-        try:
-            runner()
-        finally:
-            stop_event.set()
-            worker.join(timeout=1)
+    """Run enhanced live dashboard during agent execution.
+    
+    NOTE: Live panels conflict with permission prompts and tool output.
+    For now, we just run the runner without Live panel to avoid blinking.
+    The enhanced trace state still tracks everything for summary display.
+    """
+    # Don't use Live panel - it conflicts with permission prompts and causes blinking
+    # Just run the executor and let the normal console output show progress
+    try:
+        runner()
+    finally:
+        pass  # No cleanup needed since we're not using Live
 
 
 def update_trace_from_plan_update(trace: EnhancedTraceState, plan_items: list, conventions: list) -> None:

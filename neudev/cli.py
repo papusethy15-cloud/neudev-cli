@@ -2124,10 +2124,8 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
         )
 
     try:
-        # Use enhanced live dashboard if available
-        if isinstance(trace, EnhancedTraceState):
-            run_enhanced_live_dashboard(trace, run_turn)
-        elif should_use_live_trace_panel():
+        # Use original live trace panel (enhanced Live conflicts with permission prompts)
+        if should_use_live_trace_panel():
             _run_live_trace_panel(trace, run_turn)
         else:
             run_turn()
