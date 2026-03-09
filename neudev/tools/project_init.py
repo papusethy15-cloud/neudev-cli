@@ -99,6 +99,9 @@ class ProjectInitTool(BaseTool):
             f"Creates directory layout, config files, and source files. "
             f"Will not overwrite existing files. "
             f"IMPORTANT: You MUST provide BOTH 'template' and 'name' parameters. "
+            f"USE THIS TOOL ONLY ONCE at the start of a new project. "
+            f"After scaffolding, use write_file or edit_file to customize the created files. "
+            f"DO NOT call this tool multiple times for the same project - it creates the same files each time. "
             f"Example: project_init(template='html', name='My Website', directory='.') for HTML sites, "
             f"or project_init(template='python', name='my-app') for Python projects."
         )
@@ -209,5 +212,11 @@ class ProjectInitTool(BaseTool):
             lines.append(f"Skipped (already exist): {', '.join(skipped_files)}")
         if not created_files and not created_dirs:
             lines.append("All files already exist — nothing was created.")
+            lines.append("")
+            lines.append("IMPORTANT: The project structure already exists. Do NOT call project_init again.")
+            lines.append("Next steps: Use write_file or edit_file to customize the existing files:")
+            lines.append(f"  - Edit index.html to customize the HTML content for '{name}'")
+            lines.append(f"  - Edit css/style.css to customize the styling for '{name}'")
+            lines.append(f"  - Edit js/script.js to add custom JavaScript for '{name}'")
 
         return "\n".join(lines)

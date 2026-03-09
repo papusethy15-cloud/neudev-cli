@@ -221,7 +221,11 @@ class Agent:
         # Self-correction: track consecutive tool failures
         self._consecutive_failures: dict[str, int] = {}
         self._failure_suggestions: list[str] = []
-        
+
+        # Loop detection: track repeated tool calls to detect infinite loops
+        self._recent_tool_calls: list[tuple[str, str]] = []  # (tool_name, args_hash)
+        self._max_repeated_calls = 3  # Max times same tool+args can be called in a row
+
         self._init_system_prompt()
 
     def _build_system_prompt(self) -> str:
@@ -366,6 +370,42 @@ class Agent:
         """Clear all failure tracking (called after successful turn completion)."""
         self._consecutive_failures.clear()
         self._failure_suggestions.clear()
+
+    def _check_tool_loop(self, tool_name: str, tool_args: dict) -> bool:
+        """
+        Check if the same tool is being called repeatedly with same args (loop detection).
+
+        Args:
+            tool_name: Name of the tool being called
+            tool_args: Arguments being passed to the tool
+
+        Returns:
+            True if a loop is detected, False otherwise
+        """
+        import hashlib
+        # Create a hash of the arguments for comparison
+        args_str = str(sorted(tool_args.items())) if tool_args else ""
+        args_hash = hashlib.md5(args_str.encode()).hexdigest()
+        call_signature = (tool_name, args_hash)
+
+        # Add to recent calls
+        self._recent_tool_calls.append(call_signature)
+
+        # Keep only recent calls (sliding window)
+        if len(self._recent_tool_calls) > self._max_repeated_calls * 2:
+            self._recent_tool_calls = self._recent_tool_calls[-self._max_repeated_calls:]
+
+        # Check if the same call has been made repeatedly
+        if len(self._recent_tool_calls) >= self._max_repeated_calls:
+            recent = self._recent_tool_calls[-self._max_repeated_calls:]
+            if all(call == call_signature for call in recent):
+                return True  # Loop detected
+
+        return False
+
+    def _clear_loop_detection(self) -> None:
+        """Clear loop detection history (called after successful turn completion)."""
+        self._recent_tool_calls.clear()
 
     def process_message(
         self,
@@ -522,10 +562,11 @@ class Agent:
             response=final_response,
         )
         self._persist_turn_state(working_conversation)
-        
-        # Clear failure history after successful turn completion
+
+        # Clear failure history and loop detection after successful turn completion
         self._clear_failure_history()
-        
+        self._clear_loop_detection()
+
         return final_response
 
     def _execute_tool(self, name: str, args: dict, event_callback=None, stop_event=None) -> str:
@@ -923,6 +964,24 @@ class Agent:
 
                 tool_name = tool_call["name"]
                 tool_args = tool_call["arguments"]
+
+                # Check for infinite loop (same tool called repeatedly with same args)
+                if self._check_tool_loop(tool_name, tool_args):
+                    loop_warning = (
+                        f"\n\n⚠️ **Loop Detected:** The same tool '{tool_name}' has been called {self._max_repeated_calls} times with identical arguments.\n"
+                        f"This indicates the task may be stuck. The model should:\n"
+                        f"1. Check if the tool already succeeded (files may already be created)\n"
+                        f"2. Move on to the next task or use a different approach\n"
+                        f"3. If customization is needed, use write_file or edit_file instead\n"
+                    )
+                    # Inject a system message to help the model understand the loop
+                    working_conversation.append({
+                        "role": "system",
+                        "content": loop_warning,
+                    })
+                    # Clear the loop detection to allow progress
+                    self._clear_loop_detection()
+
                 tool_result = self._execute_tool(
                     tool_name,
                     tool_args,
@@ -1458,6 +1517,14 @@ class Agent:
                     "10. After project_init creates files, DO NOT call it again - use write_file/edit_file for customization.\n"
                     "11. For website creation: project_init creates structure, then write_file adds custom content/design.\n"
                     "12. AVOID excessive list_directory calls - use only when you need to discover unknown directory structure.\n"
+                    "13. IMPORTANT: When creating TODO items, NEVER create a task that just says 'Run project_init' or mentions tool names. Instead create USER-VISIBLE task outcomes:\n"
+                    "    - WRONG: 'Run project_init with template=html and name=Travel GO'\n"
+                    "    - CORRECT: 'Scaffold HTML/CSS/JS website structure for Travel GO' followed by\n"
+                    "    - CORRECT: 'Create index.html with Travel GO branding, navigation, and hero section'\n"
+                    "    - CORRECT: 'Style css/style.css with modern travel website theme (gradients, responsive layout)'\n"
+                    "    - CORRECT: 'Add interactive features to js/script.js (smooth scrolling, travel animations)'\n"
+                    "14. Each TODO item must describe WHAT to achieve, not WHICH TOOL to use.\n"
+                    "15. After scaffolding, the executor must customize files - make this explicit in separate TODO items.\n"
                 ),
             },
             {
@@ -1469,7 +1536,9 @@ class Agent:
                     f"EXPLICIT USER REQUEST: {user_request}\n\n"
                     f"PROJECT_INIT STATUS: {'Already called in this session - DO NOT call again, use write_file/edit_file to customize' if project_init_called else 'Not yet called - can use for initial scaffolding'}\n\n"
                     "IMPORTANT: Create TODO items ONLY for the explicit user request above. "
-                    "Do not add tasks from previous conversations or assume file existence."
+                    "Do not add tasks from previous conversations or assume file existence.\n"
+                    "CRITICAL: TODO items must describe OUTCOMES (what to build), not TOOL CALLS (how to build).\n"
+                    "Example: Write 'Create index.html with Travel GO branding' NOT 'Run project_init'."
                 ),
             },
         ]
