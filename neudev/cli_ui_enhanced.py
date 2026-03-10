@@ -67,6 +67,7 @@ class EnhancedTraceState:
     active_plan_item: str = ""
     custom_fields: dict = field(default_factory=dict)
     touched_targets: list = field(default_factory=list)  # For compatibility
+    changed_targets: list = field(default_factory=list)  # For compatibility
     workspace_delta_counts: dict = field(default_factory=lambda: {"modified": 0, "created": 0, "deleted": 0})
     
     def elapsed_seconds(self) -> float:
