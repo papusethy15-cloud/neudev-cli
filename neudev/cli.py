@@ -617,7 +617,15 @@ def build_trace_summary_lines(trace: ExecutionTraceState) -> list[str]:
             "understand": "🔍", "planner": "📋", "reviewer-pre": "🔎",
             "executor": "⚡", "reviewer": "📝", "verify": "✅",
         }
-        for phase, _model in trace.phases:
+        for phase_item in trace.phases:
+            phase = ""
+            if isinstance(phase_item, (tuple, list)) and phase_item:
+                phase = str(phase_item[0] or "")
+            else:
+                phase = str(phase_item or "")
+            phase = phase.strip().lower()
+            if not phase:
+                continue
             label = {
                 "understand": "UNDERSTAND",
                 "planner": "PLAN",
