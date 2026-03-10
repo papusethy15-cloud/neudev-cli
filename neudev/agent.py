@@ -1055,6 +1055,57 @@ class Agent:
             final_response = "Stopped by user before completion."
         return final_response, warned_about_tool_fallback, stopped
 
+    @staticmethod
+    def _looks_like_website_request(user_message: str) -> bool:
+        """Check if the user message is likely to be a website request."""
+        text = str(user_message or "").lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "website",
+                "landing page",
+                "single page",
+                "html",
+                "css",
+                "javascript",
+                "js",
+            )
+        )
+
+    def _detect_incomplete_website_scaffold(self) -> tuple[bool, str]:
+        """Heuristic check: if an HTML scaffold exists but still contains template placeholders."""
+        candidates = [
+            "index.html",
+            "css/style.css",
+            "js/script.js",
+        ]
+        placeholders = (
+            "your amazing content here",
+            "add your custom javascript here",
+            "website loaded",
+            "modern css reset",
+        )
+        missing = []
+        suspicious = []
+        for rel in candidates:
+            path = Path(self.workspace) / rel
+            if not path.exists():
+                missing.append(rel)
+                continue
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            lowered = content.lower()
+            if any(p in lowered for p in placeholders) or len(content.strip()) < 120:
+                suspicious.append(rel)
+
+        if missing:
+            return True, f"Missing expected website files: {', '.join(missing)}"
+        if suspicious:
+            return True, f"Files still look like template/placeholder: {', '.join(suspicious)}"
+        return False, ""
+
     def _run_completion_guard(
         self,
         working_conversation: list[dict],
@@ -1089,6 +1140,11 @@ class Agent:
             and not self._looks_like_clarification_response(final_response)
         )
 
+        website_needs_customization = False
+        website_issue_summary = ""
+        if mutated_workspace and self._looks_like_website_request(user_message):
+            website_needs_customization, website_issue_summary = self._detect_incomplete_website_scaffold()
+
         if mutated_workspace and self._should_run_completion_diagnostics(turn_actions):
             diagnostics_result = self._execute_tool(
                 "changed_files_diagnostics",
@@ -1112,7 +1168,12 @@ class Agent:
             if item.get("status") in {"pending", "in_progress"}
         ]
         diagnostics_failed = bool(diagnostics_result) and self._tool_result_failed(diagnostics_result)
-        needs_retry = requires_initial_repo_checks or diagnostics_failed or (had_turn_actions and bool(incomplete_items))
+        needs_retry = (
+            requires_initial_repo_checks
+            or diagnostics_failed
+            or website_needs_customization
+            or (had_turn_actions and bool(incomplete_items))
+        )
         if not needs_retry:
             return final_response
 
@@ -1137,6 +1198,15 @@ class Agent:
         if incomplete_items:
             guard_lines.append("Remaining todo items:")
             guard_lines.extend(f"- {item}" for item in incomplete_items[:6])
+        if website_needs_customization:
+            guard_lines.append("Website scaffold appears incomplete or still default/template.")
+            if website_issue_summary:
+                guard_lines.append(website_issue_summary[:1500])
+            guard_lines.append(
+                "If this is a single-page HTML/CSS/JS website request, you MUST now use tools to fully populate: index.html, css/style.css, js/script.js. "
+                "Avoid placeholders like 'Your amazing content here' or minimal templates. "
+                "After writing, re-read the files to confirm required sections exist and the content is non-trivial."
+            )
         if final_response:
             guard_lines.append("Previous draft response:")
             guard_lines.append(final_response[:1500])
@@ -1156,11 +1226,11 @@ class Agent:
             on_plan_update=on_plan_update,
             stop_event=stop_event,
             warned_about_tool_fallback=warned_about_tool_fallback,
-            max_iterations=min(4, max(1, self.config.max_iterations)),
+            max_iterations=max(4, min(8, self.config.max_iterations // 2)),
         )
-        if stopped and not retry_response:
-            return final_response or "Stopped by user before completion."
-        return retry_response or final_response
+        if stopped:
+            return retry_response
+        return retry_response
 
     @staticmethod
     def _should_run_completion_diagnostics(turn_actions) -> bool:

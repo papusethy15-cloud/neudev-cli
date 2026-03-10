@@ -2090,7 +2090,20 @@ def process_local_user_input(agent: Agent, user_input: str, *, stop_event=None) 
             ("Command Policy", command_policy_display),
         ],
     )
-    # Don't print instruction text when using enhanced UI - it will be shown in dashboard
+    # Show the previous known plan (if any) so users understand what will happen next.
+    # The agent will emit a fresh plan_update shortly after the planner runs.
+    if getattr(agent, "last_plan_items", None):
+        seed_plan = [{"text": item, "status": "pending"} for item in (agent.last_plan_items or [])]
+        if seed_plan:
+            seed_plan[0]["status"] = "in_progress"
+        render_plan_panel(
+            {"plan": seed_plan, "conventions": list(getattr(agent, "last_plan_conventions", []) or [])},
+            trace=trace,
+        )
+    else:
+        console.print(
+            "  [dim]Plan: waiting for planner output (or running in single-agent mode).[/dim]"
+        )
     console.print()
     thinking_parts: list[str] = []
     response = ""
